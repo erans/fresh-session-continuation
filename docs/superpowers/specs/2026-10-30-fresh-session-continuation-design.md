@@ -154,7 +154,7 @@ The extension never deletes session files — the record is the product. Each co
 | Notice | Emitting path | Frequency |
 |---|---|---|
 | "Context full → fresh session `<new file path>` (previous session preserved: `<old path>`)" | successful switch | once per switch |
-| "Switch to a fresh session did not land; continuing with recall on pointer context (`<error>`)" — parenthetical becomes "the switch was not dispatched" when no error was captured | never-dispatched detection, expired gate, reload re-hydrate | once per arming |
+| "Switch to a fresh session did not land; continuing with recall on pointer context (`<error>`)" — parenthetical becomes "the switch was not dispatched" when no error was captured | never-dispatched detection (including after a `reload` re-hydrate, firing at the next `agent_end`), expired gate | once per arming |
 | "fresh-session switch cancelled by tree navigation" | flag consumer — the dispatch closure, the parked `/fresh`, or the `session_tree` handler itself when no dispatch is queued and none is parked | once per cancellation |
 | "fresh-session switch cancelled by session_before_switch" | `/fresh` step 5, `{ cancelled: true }` result | once per switch |
 | "pre-flight failed (`<check>`); staying on pointer context — the run is safe" | `/fresh` step 3, failed pre-flight check | once per invocation |
