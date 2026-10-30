@@ -1,5 +1,6 @@
 import type { ExtensionAPI, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { STATE_RECORD_TYPE } from "./notices.js";
+import { isStateRecordEntry } from "./reader.js";
 
 export interface SwitchPayload {
 	oldSessionPath: string;
@@ -101,3 +102,13 @@ export function createSwitchState() {
 }
 
 export type SwitchStateInstance = ReturnType<typeof createSwitchState>;
+
+export type NoSwitchExit = "degraded" | "preflight" | "printjson" | "in-flight-refusal" | "session-before-switch-post-commit";
+
+/** Which exits append a cleared record (spec 4f). The in-flight refusal
+ * leaves the record armed (the parked switch still consumes it); a
+ * session_before_switch cancellation observed after the commit point writes
+ * nothing further (the commit-point append already cleared it). */
+export function shouldClearOnExit(path: NoSwitchExit): boolean {
+	return path === "degraded" || path === "preflight" || path === "printjson";
+}
