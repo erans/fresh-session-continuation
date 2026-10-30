@@ -1,19 +1,30 @@
 import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
-	createAgentSession,
-	DefaultResourceLoader,
+	createAgentSessionFromServices,
+	createAgentSessionRuntime,
+	createAgentSessionServices,
 	SessionManager,
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import type { ExtensionAPI, SessionEntry } from "@earendil-works/pi-coding-agent";
+import type {
+	AgentSession,
+	AgentSessionRuntime,
+	CreateAgentSessionRuntimeFactory,
+	ExtensionAPI,
+	ExtensionUIContext,
+	SessionEntry,
+} from "@earendil-works/pi-coding-agent";
 import { createFakeProvider, FAKE_MODEL, type FakeCall, type TurnScript } from "./model.js";
 
 export interface TestSession {
-	session: Awaited<ReturnType<typeof createAgentSession>>["session"];
+	session: AgentSession;
+	runtime: AgentSessionRuntime;
 	sessionFile(): string;
 	readEntries(): SessionEntry[];
 	getCalls(): FakeCall[];
+	/** Every ctx.ui.notify message, in order. */
+	notices: string[];
 	dispose(): Promise<void>;
 }
 
@@ -27,6 +38,31 @@ export interface CreateTestSessionOptions {
 	/** compaction.reserveTokens; small default forces the threshold on the first turn. */
 	reserveTokens?: number;
 	keepRecentTokens?: number;
+	/** Open an existing session file instead of creating a new one. */
+	openSessionFile?: string;
+}
+
+function makeCaptureUI(notices: string[]): ExtensionUIContext {
+	const ui = {
+		select: async () => undefined,
+		confirm: async () => false,
+		input: async () => undefined,
+		notify: (message: string) => {
+			notices.push(message);
+		},
+		onTerminalInput: () => () => {},
+		setStatus: () => {},
+		setWorkingMessage: () => {},
+		setWorkingVisible: () => {},
+		setWorkingIndicator: () => {},
+		setHiddenThinkingLabel: () => {},
+		setWidget: () => {},
+		setFooter: () => {},
+		setEditorText: () => {},
+		editor: async () => undefined,
+		custom: async () => undefined,
+	};
+	return ui as unknown as ExtensionUIContext;
 }
 
 export async function createTestSession(opts: CreateTestSessionOptions): Promise<TestSession> {
@@ -36,30 +72,68 @@ export async function createTestSession(opts: CreateTestSessionOptions): Promise
 	mkdirSync(agentDir, { recursive: true });
 
 	const calls: FakeCall[] = [];
-	const loader = new DefaultResourceLoader({
-		cwd,
-		agentDir,
-		extensionFactories: [createFakeProvider(opts.turns ?? [], calls), ...(opts.extensions ?? [])],
-	});
-	await loader.reload();
-
-	const sessionManager = SessionManager.create(cwd, opts.sessionDir);
+	const notices: string[] = [];
+	const factories = [createFakeProvider(opts.turns ?? [], calls), ...(opts.extensions ?? [])];
 	const settingsManager = SettingsManager.inMemory({
 		compaction: {
 			enabled: true,
 			reserveTokens: opts.reserveTokens ?? 100,
-			...(opts.keepRecentTokens !== undefined ? { keepRecentTokens: opts.keepRecentTokens } : {}),
+			keepRecentTokens: opts.keepRecentTokens ?? 10,
 		},
 	});
+	const uiContext = makeCaptureUI(notices);
 
-	const { session } = await createAgentSession({
+	const factory: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, sessionManager, sessionStartEvent }) => {
+		const services = await createAgentSessionServices({
+			cwd,
+			agentDir,
+			settingsManager,
+			resourceLoaderOptions: { extensionFactories: factories },
+		});
+		const result = await createAgentSessionFromServices({
+			services,
+			sessionManager,
+			sessionStartEvent,
+			model: FAKE_MODEL,
+		});
+		return { ...result, services, diagnostics: services.diagnostics };
+	};
+
+	const sessionManager = opts.openSessionFile
+		? SessionManager.open(opts.openSessionFile, undefined, cwd)
+		: SessionManager.create(cwd, opts.sessionDir);
+	const runtime = await createAgentSessionRuntime(factory, {
 		cwd,
-		model: FAKE_MODEL,
-		settingsManager,
-		resourceLoader: loader,
+		agentDir,
 		sessionManager,
+		...(opts.openSessionFile
+			? { sessionStartEvent: { type: "session_start" as const, reason: "resume" as const } }
+			: {}),
 	});
 
+	const rebind = async () => {
+		const session = runtime.session;
+		await session.bindExtensions({
+			uiContext,
+			mode: "rpc",
+			commandContextActions: {
+				waitForIdle: () => session.waitForIdle(),
+				newSession: (options) => runtime.newSession(options),
+				fork: async (entryId, forkOptions) => ({ cancelled: (await runtime.fork(entryId, forkOptions)).cancelled }),
+				navigateTree: async (targetId, options) => ({
+					cancelled: (await session.navigateTree(targetId, options)).cancelled,
+				}),
+				switchSession: (sessionPath, options) => runtime.switchSession(sessionPath, options),
+				reload: async () => {
+					await session.reload();
+				},
+			},
+		});
+	};
+	runtime.setRebindSession(rebind);
+	await rebind();
+
+	const session = runtime.session;
 	const readEntries = (): SessionEntry[] => {
 		const file = session.sessionManager.getSessionFile();
 		if (!file) return [];
@@ -72,11 +146,13 @@ export async function createTestSession(opts: CreateTestSessionOptions): Promise
 
 	return {
 		session,
+		runtime,
 		sessionFile: () => session.sessionManager.getSessionFile() ?? "",
 		readEntries,
 		getCalls: () => calls,
+		notices,
 		dispose: async () => {
-			session.dispose();
+			await runtime.dispose();
 		},
 	};
 }

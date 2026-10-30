@@ -31,8 +31,8 @@ export const FAKE_MODEL: Model<"fake-stream"> = {
 	baseUrl: "http://invalid.invalid",
 	input: ["text"],
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-	contextWindow: 200_000,
-	maxTokens: 16_384,
+	contextWindow: 2_000,
+	maxTokens: 1_000,
 	reasoning: false,
 	type: "chat",
 };
