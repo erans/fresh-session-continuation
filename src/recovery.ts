@@ -3,6 +3,34 @@ import { NOTICES } from "./notices.js";
 import { queueDispatch } from "./hook.js";
 import { appendStateRecord, resolveActiveRecord, type SwitchStateInstance } from "./state.js";
 
+/**
+ * session_tree handler (spec 4d): the handler has three responsibilities
+ * and only those — set the cancelled flag (only when armed/in-flight),
+ * append the cleared record when it does, and in the consumerless case emit
+ * the single notice itself and return the machine to idle. The flag
+ * consumer (dispatch closure or parked /fresh) emits otherwise.
+ */
+export function registerTreeHandler(pi: ExtensionAPI, st: SwitchStateInstance): void {
+	pi.on("session_tree", async (_event, ctx) => {
+		const state = st.getState();
+		if (state !== "armed" && state !== "in-flight") return; // idle /tree: no-op
+		st.setCancelled();
+		appendStateRecord(pi, {
+			state: "cleared",
+			owner: ctx.sessionManager.getSessionFile() ?? "",
+			oldSessionPath: st.getPayload()?.oldSessionPath ?? ctx.sessionManager.getSessionFile() ?? "",
+			pointerTextStatic: st.getPayload()?.pointerTextStatic ?? "",
+			armedAt: Date.now(),
+		});
+		if (!st.getDispatchQueued() && !st.getParkedFresh()) {
+			// consumerless (the re-hydrated armed state after a reload)
+			ctx.ui.notify(NOTICES.treeCancelled());
+			st.clearCancelled();
+			st.toIdle();
+		}
+	});
+}
+
 const RECOVERY_WINDOW_MS = 60_000;
 
 /**
@@ -35,7 +63,7 @@ export function registerRecovery(pi: ExtensionAPI, st: SwitchStateInstance): voi
 
 		// in-memory re-arm only: the record keeps its original armedAt/owner/text
 		st.arm({ oldSessionPath: record.oldSessionPath, pointerTextStatic: record.pointerTextStatic });
-		queueDispatch(pi, st);
+		queueDispatch(pi, st, (m) => ctx.ui.notify(m));
 	});
 
 	pi.on("session_shutdown", () => st.markInactive());

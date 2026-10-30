@@ -2,7 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createSwitchState } from "./state.js";
 import { registerCompactionHook } from "./hook.js";
 import { registerFreshCommand } from "./fresh.js";
-import { registerRecovery } from "./recovery.js";
+import { registerRecovery, registerTreeHandler } from "./recovery.js";
 
 export { PLACEHOLDER_STATIC, renderVolatilePlaceholder } from "./spike.js";
 export { STATE_RECORD_TYPE } from "./notices.js";
@@ -16,5 +16,6 @@ export default function freshSessionExtension(pi: ExtensionAPI): void {
 	const st = createSwitchState();
 	registerCompactionHook(pi, st);
 	registerFreshCommand(pi, st);
+	registerTreeHandler(pi, st);
 	registerRecovery(pi, st);
 }

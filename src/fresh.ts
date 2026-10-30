@@ -4,6 +4,25 @@ import { PLACEHOLDER_STATIC, renderVolatilePlaceholder } from "./spike.js";
 import { appendStateRecord, type SwitchStateInstance } from "./state.js";
 
 /**
+ * The last-step guard, run immediately before newSession on every path:
+ * cancelled → one notice, machine to idle; inactive runtime → silent abort.
+ * Exported for unit tests.
+ */
+export function lastStepGuard(st: SwitchStateInstance, notify: (m: string) => void): boolean {
+	if (st.getCancelled()) {
+		notify(NOTICES.treeCancelled());
+		st.clearCancelled();
+		st.toIdle();
+		return false;
+	}
+	if (!st.isActive()) {
+		st.toIdle();
+		return false;
+	}
+	return true;
+}
+
+/**
  * /fresh — auto-invoked at the threshold (via the deferred dispatch) and
  * manually invocable. Creates the fresh session with a parentSession link
  * and auto-submits the pointer prompt as its first message.
@@ -17,6 +36,7 @@ export function registerFreshCommand(pi: ExtensionAPI, st: SwitchStateInstance):
 				return;
 			}
 			st.toInFlight();
+			st.setParkedFresh(true);
 			try {
 				const payload = st.getPayload();
 				const oldSessionPath = payload?.oldSessionPath ?? ctx.sessionManager.getSessionFile();
@@ -30,11 +50,7 @@ export function registerFreshCommand(pi: ExtensionAPI, st: SwitchStateInstance):
 
 				// last-step guard, then the commit point: clearing the record
 				// immediately before newSession is the only clearing past this point
-				if (st.getCancelled() || !st.isActive()) {
-					st.clearCancelled();
-					st.toIdle();
-					return;
-				}
+				if (!lastStepGuard(st, (m) => ctx.ui.notify(m))) return;
 				appendStateRecord(pi, {
 					state: "cleared",
 					owner: oldSessionPath,
@@ -62,6 +78,7 @@ export function registerFreshCommand(pi: ExtensionAPI, st: SwitchStateInstance):
 					ctx.ui.notify(NOTICES.degraded("session_before_switch"));
 				}
 			} finally {
+				st.setParkedFresh(false);
 				st.toIdle();
 			}
 		},

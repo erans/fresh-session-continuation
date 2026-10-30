@@ -51,6 +51,7 @@ export function createSwitchState() {
 	let cancelled = false;
 	let active = true;
 	let dispatchQueued = false;
+	let parkedFresh = false;
 	let payload: SwitchPayload | null = null;
 
 	return {
@@ -97,6 +98,12 @@ export function createSwitchState() {
 		},
 		setDispatchQueued(v: boolean): void {
 			dispatchQueued = v;
+		},
+		getParkedFresh(): boolean {
+			return parkedFresh;
+		},
+		setParkedFresh(v: boolean): void {
+			parkedFresh = v;
 		},
 	};
 }

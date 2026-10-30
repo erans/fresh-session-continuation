@@ -85,7 +85,7 @@ export function registerCompactionHook(pi: ExtensionAPI, st: SwitchStateInstance
 		st.arm(payload);
 
 		if (ctx.mode !== "tui" && ctx.mode !== "rpc") return; // print/json: pointer compaction only
-		queueDispatch(pi, st);
+		queueDispatch(pi, st, (m) => ctx.ui.notify(m));
 	});
 
 	pi.on("session_compact_failed", async () => {
@@ -94,12 +94,23 @@ export function registerCompactionHook(pi: ExtensionAPI, st: SwitchStateInstance
 }
 
 /** Self-guarding deferred dispatch, shared by arming and recovery. */
-export function queueDispatch(pi: ExtensionAPI, st: SwitchStateInstance): void {
+export function queueDispatch(
+	pi: ExtensionAPI,
+	st: SwitchStateInstance,
+	notify: (message: string) => void,
+): void {
 	if (st.getDispatchQueued()) return;
 	st.setDispatchQueued(true);
 	setImmediate(() => {
 		try {
-			if (!st.isActive() || st.getCancelled() || st.getState() === "idle") return;
+			if (st.getCancelled()) {
+				// the flag consumer: one notice, machine back to idle
+				notify(NOTICES.treeCancelled());
+				st.clearCancelled();
+				st.toIdle();
+				return;
+			}
+			if (!st.isActive() || st.getState() === "idle") return;
 			pi.sendUserMessage("/fresh", { expandPromptTemplates: true });
 		} catch {
 			// stale-runner throw or rejected send → not dispatched; the persisted
