@@ -1,6 +1,7 @@
 # Fresh-Session Continuation for pi — retrieval instead of compaction
 
 **Status**: design awaiting approval · **Date**: 2026-10-30 · **Target**: pi extension (pi ≥ 1.4.0)
+**Review history**: roborev design reviews 4406 (14 findings) and 4407 (15 findings), all addressed.
 
 ## Intent
 
@@ -13,17 +14,17 @@ Why: compaction today spends a full-context LLM call (measured elsewhere: 29–3
 1. **Fully automatic** at the same trigger points as today's compaction (threshold between turns, pre-prompt check, overflow recovery). Zero user action.
 2. **Fresh session file**, created in-process; the interrupted task continues with no user involvement.
 3. **Zero LLM summarization** anywhere in the flow. The switch itself costs ~0 s / $0. The only new spend is on-demand recall calls.
-4. **Lossless**: every token moved out of context stays reachable verbatim via a recall tool.
-5. **Self-healing degradation where pi supports it**: if the switch is cancelled (`session_before_switch`) or the deferred dispatch never executes, the session continues losslessly in place on pointer + recall context. A throw inside `ctx.newSession` *after teardown begins* is fatal to the process (pi's TUI wrapper exits on command-context errors); the guarantee there is limited to: the old session file remains intact and resumable. Pre-flight validation minimizes the chance of reaching that path.
+4. **Lossless**: every token moved out of context stays reachable verbatim via the recall tools. Reachability across the ancestor chain is *budgeted, never silently truncated* — when a budget cuts the walk, the tools say so (Chain walk semantics).
+5. **Self-healing degradation where pi supports it**: if the switch is cancelled (`session_before_switch`), the dispatch is deliberately skipped, or the deferred dispatch never executes, the session continues losslessly in place on pointer + recall context. A throw inside `ctx.newSession` *after teardown begins* is fatal to the process (pi's TUI wrapper exits on command-context errors); the guarantee there is limited to: the old session file remains intact and resumable. Pre-flight validation minimizes the chance of reaching that path.
 6. **Exception (explicit)**: in-memory sessions (`--no-session`) have no record to retrieve from; there the extension falls through to pi's default LLM compaction and notifies once. Goals 3–4 hold for persisted sessions, which is the only mode where they are meaningful.
 
 ## Non-goals
 
 - No summaries, embeddings, vector indexes, or curated "memory". The model gets the raw record plus tools (the bitter-lesson stance).
-- No cross-project knowledge base. `recall` targets only the current session's file and its `parentSession` ancestor chain — no arbitrary-path search.
+- No cross-project knowledge base. `recall` targets only the current session's file and its validated `parentSession` ancestor chain — no arbitrary paths, and chain targets are validated before reading (Chain walk semantics).
 - No pi-core changes. Extension only.
 - Branch summarization (`/tree`, `session_before_tree`) keeps pi's default behavior; out of scope for v1.
-- Auto-switch in print mode is out of scope (pointer compaction only); session switching is exercised in TUI and RPC modes.
+- Auto-switch in **print and json modes** is out of scope (pointer compaction only; detection via `ctx.mode` — `ctx.hasUI` cannot distinguish print from RPC). Session switching is exercised in **TUI and RPC** modes.
 
 ## Anti-goals
 
@@ -33,57 +34,72 @@ Why: compaction today spends a full-context LLM call (measured elsewhere: 29–3
 
 ## Constraints (verified against pi 1.4.0 source)
 
-- `session_before_compact` can return custom compaction content; the returned `firstKeptEntryId` passes verbatim to `appendCompaction`, where `firstKeptEntryId ?? id` yields a **retain-none** compaction (`agent-session.js` ~2253/2543, `session-manager.js:890`). The TypeScript type says `string`; runtime accepts `undefined` (needs a cast).
+- `session_before_compact` can return custom compaction content; the returned `firstKeptEntryId` passes verbatim to `appendCompaction`, where `firstKeptEntryId ?? id` yields a **retain-none** compaction (`agent-session.js` ~2253/2543, `session-manager.js:890`). The TypeScript type says `string`; runtime accepts `undefined` (needs a cast; Stage 0 gates this).
+- **Handler arbitration**: pi runs every `session_before_compact` handler; the last non-cancel result wins, and a `cancel` short-circuits the chain (`runner.js:816–825`). Our compaction can therefore be overridden or cancelled by another handler; the design must not assume its own result landed.
+- **Hook error path**: a throwing hook handler is swallowed into `emitError`, after which pi runs the default LLM compaction (`agent-session.js:2544–2580`) — silently reintroducing the summarization call the design deletes. The hook body must be self-guarding.
 - Session replacement (`ctx.newSession`) exists only on `ExtensionCommandContext`; lifecycle handlers must not call it directly (deadlock rule). Escape hatch: `pi.sendUserMessage("/fresh", { expandPromptTemplates: true })` — `prompt()` dispatches extension commands **immediately, even during streaming**, before the streaming-queue check (`agent-session.js:1626–1646`).
-- The dispatch must be **deferred one tick** (`setImmediate`) from inside the compaction hook, so the command runs on the normal command path after the hook returns, not re-entrantly inside its dispatch stack.
-- **Trigger timing** (drives the switch semantics below): the threshold check fires between turns (after tool results, before the next LLM call) and after `agent_end` at run boundaries; the pre-prompt check fires at the start of `_prepareRun` — **before the triggering prompt is appended to the session** (`agent-session.js:1480–1486`); overflow recovery fires after the failed run, with the retry pending.
-- `newSession` handles an active run: `teardownCurrent` awaits `session.abort()`, so the in-flight turn (including tool results) persists to the outgoing session before replacement (`agent-session-runtime.js:102–110`). `session.abort()` does **not** restore queued steering input to the editor (that TUI path is not invoked), and in-memory queues (`_steeringMessages`/`_followUpMessages`) are dropped at dispose — hence the pending-message guard below.
-- `withSession` receives a `ReplacedSessionContext` exposing `sendUserMessage`, which **awaits the entire first turn** of the fresh session (`agent-session.js:1910–1939`): `newSession`, the `/fresh` handler, and the outer dispatch chain stay pending for the length of that run.
+- The dispatch must be **deferred one tick** (`setImmediate`) from inside the compaction flow, so the command runs on the normal command path, not re-entrantly inside the hook's dispatch stack.
+- **Trigger timing**: the threshold check fires between turns (after tool results, before the next LLM call) and after `agent_end` at run boundaries; the pre-prompt check fires at the start of `_prepareRun` — **before the triggering prompt is appended to the session** (`agent-session.js:1480–1486`); overflow recovery fires after the failed run, with the retry pending.
+- `newSession` handles an active run: `teardownCurrent` awaits `session.abort()`, so the in-flight turn (including tool results) persists to the outgoing session before replacement (`agent-session-runtime.js:102–110`). `session.abort()` does **not** restore queued steering input to the editor, and in-memory queues (`_steeringMessages`/`_followUpMessages`) are dropped at dispose.
+- `hasPendingMessages()` is a point-in-time read; `waitForIdle()` can return while `_deferredSettledActions` still hold prompts; input submitted between any guard check and teardown's dispose is lost. No-drop is therefore **best-effort**, not absolute.
+- `withSession` receives a `ReplacedSessionContext` exposing `sendUserMessage`, which **awaits the entire first turn** of the fresh session (`agent-session.js:1910–1939`).
 - The TUI wraps command-context session operations in error handling that escalates a throw to a fatal runtime error and process exit (`interactive-mode.js:1484–1491, 1609–1623`).
 - `preparation.fileOps` is available only inside the hook; the extraction helpers are not exported by the package, so `/fresh` cannot recompute file lists — the hook must hand them over.
-- Fresh session headers carry `parentSession` — `recall` finds its default targets mechanically, with no cross-runtime state.
+- Fresh session headers carry `parentSession`; entry IDs are unique only within one file (`generateId`, 8 hex chars, `session-manager.js:21–29`), so cross-file fetches must key on file + entry id.
 - In-memory sessions (`--no-session`) have no file to recall from: fall through to default compaction.
 
 ## Approaches
 
 1. **Manual `/fresh` only** — works, dead simple, but the user wants it as automatic as compaction is today. Rejected.
 2. **Same-session retain-none pointer compaction only** — automatic everywhere, zero risk, but not a fresh session file; the user said the fresh session is key. Rejected as primary; retained as the fallback flavor (safety net).
-3. **Auto-switch at threshold with a pointer-compaction safety net** — chosen. The hook writes a retain-none pointer compaction (static text, no LLM call), then defers a self-invoked `/fresh` command by one tick. Happy path: fresh session file, task continues there. Failed switch: in-place pointer continuation, task continues anyway. The purist variant (`cancel: true`, no safety net) was rejected: if the deferred switch ever fails, the run continues on a full context, overflows the provider, and a cancelled recovery leaves it dead mid-task. A review pass refined two details: `/fresh` waits for idle when messages are queued (no in-flight drops, ever), and manual `/compact` keeps pi's recent-tail cut rather than going retain-none (see below).
+3. **Auto-switch at threshold with a pointer-compaction safety net** — chosen. The hook writes a retain-none pointer compaction (static text, no LLM call); after the compaction is *confirmed landed*, the extension defers a self-invoked `/fresh` command by one tick. Happy path: fresh session file, task continues there. Failed or skipped switch: in-place pointer continuation, task continues anyway. The purist variant (`cancel: true`, no safety net) was rejected: if the deferred switch ever fails, the run continues on a full context, overflows the provider, and a cancelled recovery leaves it dead mid-task. Two review passes refined the mechanics without changing the choice: arming moves to compaction confirmation (extension arbitration), the switch waits for queued input to drain (no deliberate drops), manual `/compact` keeps pi's recent-tail cut, and chain reachability is explicitly budgeted rather than capped by file count.
 
 ## How (decided)
+
+### Contract: pi's compaction trigger stays enabled
+
+The extension replaces the **summarization LLM call**, not the trigger machinery. All three trigger points (threshold between turns, pre-prompt check, overflow recovery) live inside pi's compaction machinery; with `compaction.enabled: false` the hook never fires (`_checkCompaction` early-returns, `agent-session.js:2393`), the extension is a silent no-op, and a full context dead-ends — the anti-goal. On `session_start`, if compaction is disabled, notify prominently (once; guard with `ctx.hasUI`/`ctx.mode`): the extension requires the machinery enabled (the default). A private threshold watcher (`turn_end` + `getContextUsage()` + `ctx.compact()`) was rejected as a duplicate engine with its own race surface. Tested in Stage 4.
 
 ### Threshold and overflow flow (`reason: "threshold" | "overflow"`)
 
 1. Hook `session_before_compact` fires. If the session is not persisted → return `undefined` (default LLM compaction; nothing to recall) and notify once.
-2. Build the pointer text (below). Return `{ compaction: { summary: pointerText, firstKeptEntryId: undefined, tokensBefore } }` → retain-none entry, zero LLM cost. **This is the safety net**: context immediately becomes `[system][pointer]`.
-3. Persist the **switch payload** in extension runtime state: `{ oldSessionPath, readFiles, modifiedFiles }` (the parts only the hook can compute), and set a **switch-pending** flag.
-4. `setImmediate(() => pi.sendUserMessage("/fresh", { expandPromptTemplates: true }))`, guarded against double-queuing per threshold event. The promise is unobserved by design (the API returns void); detection of a failed dispatch is the switch-pending flag, not a rejected promise.
-5. `/fresh` executes on the normal command path (details below), consuming the payload. It captures the **last user message, its images, and the TOC from the persisted branch at execution time** — one tick after the trigger, so the pre-prompt case sees the triggering prompt once it is appended. The spike must confirm this ordering; if the newest message is not yet on the branch when `/fresh` runs, re-read with a bounded wait rather than proceeding with a stale payload.
+2. Build the pointer text (below) **inside a self-guarding wrapper**: on any failure (unreadable ancestor, malformed line), fall back to a *minimal pointer* built from data already in hand (old session path + last user message + self-sufficiency line) and notify — never let the hook throw, because a throw silently reverts to the default LLM compaction.
+3. Return `{ compaction: { summary: pointerText, firstKeptEntryId: undefined, tokensBefore } }` → retain-none entry, zero LLM cost. **This is the safety net**: context immediately becomes `[system][pointer]`.
+4. **Arm only on confirmation** (`session_compact` event with `fromExtension: true` and our exact summary text): store the **switch payload** `{ oldSessionPath, readFiles, modifiedFiles, pointerText }` in extension runtime state, set the **switch-pending** flag, and — only in `tui`/`rpc` modes — `setImmediate(() => pi.sendUserMessage("/fresh", { expandPromptTemplates: true }))`, guarded against double-queuing. Disarm on `session_compact_failed` or an aborted `compaction_end`: another extension cancelled or overrode our compaction, so no switch may fire (its pointer text may not even be in the file). In `print`/`json` modes the flag is cleared deliberately, no dispatch, no degraded notice later.
+5. `/fresh` executes on the normal command path (details below), consuming the armed payload. It captures the **last user message, its images, and the TOC from the persisted branch at execution time** — one tick after the trigger, so the pre-prompt case sees the triggering prompt once it is appended. The spike must confirm this ordering; if the newest message is not yet on the branch when `/fresh` runs, re-read with a bounded wait rather than proceeding with a stale payload.
 
 ### `/fresh` command (auto-invoked at threshold; manually invocable)
 
-1. Clear the switch-pending flag (the dispatch landed).
-2. **Pending-message guard**: if `ctx.hasPendingMessages()`, `await ctx.waitForIdle()` first, so queued input is delivered and persisted before the switch — nothing is dropped, ever.
-3. **Pre-flight validation** before `newSession`: old session file readable, session dir writable, parent path resolvable. Any failure → notify and stay on pointer mode (the run is safe; no switch attempt). This keeps the fatal-after-teardown path (`session.abort()` → dispose → throw) as unlikely as it can be made from extension code.
-4. Build the pointer prompt from the hook payload + the persisted branch tail.
-5. `ctx.newSession({ parentSession: oldSessionPath, withSession: rc => rc.sendUserMessage(pointerPrompt) })`, wrapped in try/catch: on `{ cancelled: true }` or a throw *before* teardown, notify and stay on pointer mode. A throw after teardown is fatal to the process (Constraint); the old session file remains intact and resumable — that is the stated guarantee.
-6. **Blocking semantics, decided**: the pointer prompt is sent *inside* `withSession` and awaited (`ReplacedSessionContext.sendUserMessage` awaits the first turn). The automatic chain is fire-and-forget from `setImmediate`, so nothing user-visible blocks. The known consequence: a **manual** `/fresh` submitted over RPC keeps that RPC request open for the duration of the fresh session's first turn — documented, acceptable. Print mode disables auto-switch entirely (non-goal above).
+1. Clear the switch-pending flag (the dispatch landed). For a **manual** invocation with no armed payload, regenerate text-only from the current branch (file lists omitted — they cannot be recomputed outside the hook).
+2. **Queued-input drain**: if `ctx.hasPendingMessages()`, `await ctx.waitForIdle()` first, so queued input is delivered and persisted before the switch. Best-effort, not absolute: **re-check `hasPendingMessages()` immediately before `newSession`**; if input slipped in during the race window, it is lost at dispose (not restorable to the editor) — emit a notice: "input submitted during the switch was not delivered and is not in the record; re-send if needed."
+3. **Pre-flight validation** before `newSession`: old session file readable, session dir writable, parent path resolvable, **a model is selected and its auth resolves** (a fresh session whose first turn cannot run is a trap). Any failure → notify and stay on pointer mode (the run is safe; no switch attempt).
+4. Build the pointer prompt from the armed payload + the persisted branch tail.
+5. `ctx.newSession({ parentSession: oldSessionPath, withSession: rc => rc.sendUserMessage(pointerPrompt) })`. A `{ cancelled: true }` result or a throw *before* teardown → notify and stay on pointer mode. A throw after teardown is fatal (Constraint); the old session file remains intact and resumable — the stated guarantee.
+6. **First-turn failure is handled separately from switch failure**: wrap the `sendUserMessage` call inside `withSession`; a rejection (auth expiry, provider outage) is reported as "switched, but continuation failed" with the old session path and a resume instruction — the user is never stranded silently inside a pointer-only fresh session.
+7. **Blocking semantics, decided**: the pointer prompt is sent *inside* `withSession` and awaited (`ReplacedSessionContext.sendUserMessage` awaits the first turn). The automatic chain is fire-and-forget from `setImmediate`, so nothing user-visible blocks. Known consequence: a **manual** `/fresh` submitted over RPC keeps that request open for the duration of the fresh first turn — documented, acceptable. Print/json modes never auto-switch (non-goal).
 
-### Per-trigger switch timing
+### Per-trigger switch timing (coherent with the drain rule above)
 
-| Trigger | Hook fires | In-flight request when `/fresh` runs | Switch lands |
+| Trigger | Hook fires | Switch lands | Waste |
 |---|---|---|---|
-| Threshold, mid-run | between turns (after tool results, before next LLM call) | none, or the first small post-pointer call | immediately; `teardownCurrent` settles the turn |
-| Threshold, run boundary | after `agent_end`, before the next run | none | immediately, already idle |
-| Pre-prompt | start of `_prepareRun`, before the prompt is appended | the new run's first LLM call (small post-pointer input) | that call is aborted (cents); the triggering prompt is persisted and becomes the pointer's "last user message" |
-| Overflow recovery | after the failed run, retry pending | the retried turn's first call | aborted; the pointer carries the task |
+| Threshold, mid-run | between turns (after tool results, before next LLM call) | no queued input → immediately (the remaining run continues in the fresh session; nothing is in flight between turns); queued input → after the drain wait | none, or one small post-pointer call if a turn had just started |
+| Threshold, run boundary | after `agent_end`, before the next run | immediately (already idle) | none |
+| Pre-prompt | start of `_prepareRun`, before the prompt is appended | after the new run's first call is aborted (the triggering prompt is persisted first and becomes the pointer's "last user message") | one small post-pointer request |
+| Overflow recovery | after the failed run, retry pending | the retried call is aborted; the pointer carries the task | one small post-pointer request |
 
-Waste is bounded to at most one small post-pointer request, only on the pre-prompt and overflow paths; the common threshold paths abort nothing.
+A second threshold during a drain wait re-fires the hook but the double-queue guard holds; `/fresh`'s payload is captured at execution time, so it naturally reflects anything delivered during the wait.
 
 ### Manual `/compact` (`reason: "manual"`)
 
 - Bare `/compact` → **pointer compaction that keeps pi's suggested `firstKeptEntryId`**: the recent tail stays exactly as pi's manual compaction keeps it, and the LLM summary call is replaced by the static pointer. Rationale: manual `/compact` means "shrink this session so I can keep going" — the recent tail is what the user continues from; retain-none would silently change that contract. The threshold path stays retain-none because the fresh session starts from the pointer alone. No auto-switch on manual compaction.
 - `/compact <instructions>` → return `undefined` → default LLM compaction: the user explicitly asked for a focused summary; explicit intent wins.
+
+### Chain walk semantics (recall targets, budgets, trust boundary)
+
+- **Targets, by construction**: the current session's file plus its `parentSession` ancestors, walked newest→oldest. **No arbitrary-path parameter.**
+- **Trust boundary**: `parentSession` is on-disk content that imported, forked, hand-edited, or third-party sessions can set to any path. Every ancestor target is validated before reading: it must exist, parse as a pi session file (header `type: "session"`), and resolve **inside the session directory** of the current session store. On violation the walk stops at that link, and the result carries a notice ("ancestor chain invalid at `<path>`; not read"). This keeps the read primitive from being reintroduced by the side door.
+- **Budgets, never silent truncation**: both the pointer-TOC generator and `recall` walk the chain under explicit budgets — max bytes read per walk (~50 MB), max elapsed time (~10 s), max chain depth (~8). When a budget cuts the walk, the output says exactly which older files were **not** scanned/indexed this call, so the model can narrow or fetch by file explicitly. Reachability degrades loudly, never silently.
+- The whole chain is reachable across successive calls: a budget exhausted on one call can resume on the next with a narrower query or an explicit file target.
 
 ### The pointer text (one generator, two call sites: compaction summary and `/fresh` prompt)
 
@@ -91,57 +107,57 @@ Mechanical, lossless, no LLM:
 
 - absolute path of the old session file, and that the record is complete and verbatim;
 - the **last user message verbatim** (captured at `/fresh` execution time), marked "you were mid-task; resume this"; for the `/fresh` prompt, re-attach that message's image blocks too (`sendUserMessage` accepts `ImageContent`) so multimodal tasks keep their inputs;
-- a TOC: first line of every user message on the active branch, rebuilt from the branch plus ancestor files so it is **cumulative** (an index, not a summary; size-capped with a truncation marker);
-- files read/modified, from the hook's `preparation.fileOps` (manual `/fresh` without a preceding hook omits this list — it cannot be recomputed);
+- a TOC: first line of every user message on the active branch plus ancestor files (chain-walk budgets apply; on budget exhaustion the TOC ends with "older record not indexed this pass: `<files>`") — an index, not a summary; size-capped with a truncation marker;
+- files read/modified, from the armed payload's `preparation.fileOps` (manual `/fresh` omits this list);
 - usage instruction: "Do not re-ask the user. When you need the exact error message, file path, number, or prior decision, search the record with `recall` instead of re-deriving.";
-- **self-sufficiency**: "If the `recall` tool is not available (extension disabled), read the session file directly with the read/bash tools." — so a resumed pointer-only session still works under stock pi, where the only cost is that the model greps the JSONL itself.
+- **self-sufficiency**: "If the `recall` tool is not available (extension disabled), read the session file directly with the read/bash tools." — a resumed pointer-only session still works under stock pi, where the only cost is that the model greps the JSONL itself.
 
 ### `recall` tool set (read-only)
 
-- `recall` — search: `{ query: string (literal or regex), role?: user|assistant|toolResult, limit? }` → hits with file, entry id, role, timestamp, short excerpt. Targets, by construction: the current session's file and its `parentSession` ancestor chain (cap ~5 files). **No arbitrary-path parameter** in v1 — that was cut in review as an unexamined data-exposure surface (any session JSONL on disk, other projects, pasted secrets).
-- `recall_get` — fetch verbatim: `{ entryId }` or `{ around: { entryId, before, after } }` → exact content (full tool results included), capped with a marker and a way to page.
-- **Scan budgets** (both tools): max bytes scanned per call (~50 MB), max elapsed time (~10 s), max matches returned (~50); a truncated result says so and tells the model to narrow the query. Files can be hundreds of MB and the query is model-chosen — an unbounded scan can pin a turn.
+- `recall` — search: `{ query: string (literal or regex), role?: user|assistant|toolResult, limit? }` → hits with **file, entry id, role, timestamp, short excerpt**. `limit` is **global across the target set with a per-file floor** (~5) so the tiny current file cannot starve ancestor hits; returned hits are interleaved **newest-first by timestamp** across files. Total result bytes are capped (~32 KB) with a truncation marker; the cap is counted in the cost criterion. Budget-cut walks report the unscanned files explicitly (Chain walk semantics).
+- `recall_get` — fetch verbatim: `{ file, entryId }` (entry IDs are unique only per file, so the file is part of the key) or `{ around: { file, entryId, before, after } }` → exact content (full tool results included). Paged: `{ file, entryId, offset }` continues a truncated fetch; a capped result ends with a cursor line.
 - Implementation: stream the JSONL line-by-line; never load whole files; tolerate a partial trailing line (files are mid-append); search abandoned branches too (a feature: "what did I try before?").
 
 ### Degradation and edge cases
 
-- **Switch cancelled or never dispatched** → the safety net already landed; the run continues in place, losslessly. The **switch-pending flag** detects the never-dispatched case: set at the hook, cleared when `/fresh` executes; if the next `agent_end` (same session file) still sees it set, emit the degraded notice and log the captured error. Cancellation (`session_before_switch`) is observed directly in `/fresh`'s result.
-- **Throw after teardown** → fatal (Constraint); old session file intact and resumable; pre-flight makes this path unlikely.
+- **Switch cancelled, deliberately skipped, or never dispatched** → the safety net already landed; the run continues in place, losslessly. The **switch-pending flag** detects the never-dispatched case: set at arming, cleared when `/fresh` executes or when skipped by mode; if the next `agent_end` (same session file) still sees it set, emit the degraded notice and log the captured error. Cancellation (`session_before_switch`) is observed directly in `/fresh`'s result.
+- **Throw after teardown** → fatal (Constraint); old session file intact and resumable; pre-flight + first-turn handling make this path as unlikely as extension code can.
 - Overflow recovery (`willRetry: true`) → same flow; if the switch loses the race, the retried turn proceeds on pointer context.
 - Double-threshold guard: never queue `/fresh` twice.
-- Queued input: the pending-message guard delivers and persists it before any switch; no drops in the automatic path. A manual mid-stream `/fresh` also waits for idle — same guarantee.
+- Queued input: drained and persisted before any switch (best-effort with a re-check; residual race window noticed to the user, per `/fresh` step 2).
 - Images: `recall` returns text only (documented limit); the switch itself re-attaches the last user message's images.
-- Resuming a pointer session with the extension disabled: the pointer text is self-sufficient (see pointer section); the full record remains reachable through `/tree` and the file system. The session picker shows pointer text until the session is named — acceptable; no auto-renaming in v1.
-- RPC mode: the flow works headlessly; a manual `/fresh` holds its request open for the fresh first turn (documented above). Print mode: no auto-switch.
+- Resuming a pointer session with the extension disabled: the pointer text is self-sufficient (pointer section); the full record remains reachable through `/tree` and the file system. The session picker shows pointer text until the session is named; no auto-renaming in v1.
+- RPC mode: works headlessly; a manual `/fresh` holds its request open for the fresh first turn (documented). Print/json modes: no auto-switch (pointer compaction only).
+
+### Retention policy
+
+The extension never deletes session files — the record is the product. Each continuation creates one new session file; the switch notice names the new file, and each pointer names its source file, so chain members are identifiable. Disk growth is documented in the README (Stage 6), including manual cleanup via the session picker (`Ctrl+D` → trash). Pruning pointer-only intermediate sessions is explicitly deferred: a wrong prune destroys the record the design exists to keep.
 
 ### TUI
 
-- Notify on switch: "Context full → fresh session (previous session preserved: `<path>`)".
+- Notify on switch: "Context full → fresh session `<new file path>` (previous session preserved: `<old path>`)".
 - Notify on degradation: "Switch to a fresh session did not land; continuing with recall on pointer context (`<error>`)".
 - Entry renderer for the pointer compaction: a divider like "— context moved onward; use recall —".
 
-## Success criteria (measured on the reference ~400k-token session)
+## Success criteria
 
-- Switch latency, trigger → fresh session's first turn starts: **< 5 s**.
-- Cost per continuation: **$0** for the switch itself; **< $0.10** total for the fresh first turn plus recall calls (vs. $0.17–1.99 for one compaction).
-- Replay check: a scripted task interrupted at the threshold completes in the fresh session **without re-asking the user** — the pointer carries the task, recall finds the specifics.
+Measured on a **reference fixture**: a committed generator script produces a ~400k-token persisted session of realistic tool traffic (reads, edits, bash output, errors) with a scripted task in progress; the measuring model and its price table are recorded next to every dollar figure in the README. Procedure: run the fixture, force the threshold, measure.
+
+- Switch latency, trigger → fresh session's first turn starts: **< 5 s** in the no-queued-input case (pointer generation, including its chain-walk budget, is inside this number). Queued-input case: switch lands at drain + < 5 s; reported separately.
+- Cost per continuation: **$0** for the switch itself; **< $0.10** total for the fresh first turn plus recall calls, including the ~32 KB result cap (vs. $0.17–1.99 for one compaction), at the README's recorded model and prices.
+- Replay check: the scripted task interrupted at the threshold completes in the fresh session **without re-asking the user** — the pointer carries the task, recall finds the specifics.
+- **Chain check**: a 6+ generation chain retrieves a fact from the oldest session (budgets may require a second narrowed call; a silent miss fails).
 - Disable-compatibility check: the same session resumed with the extension removed still continues the task from the pointer text alone.
 
 ## Staged delivery (each stage has an exit criterion; later stages depend on earlier)
 
-0. **Spike, retained as an integration test**: deferred dispatch + retain-none + switch on a synthetic session. Exit: switch lands, no deadlock, aborted turn persisted, pointer prompt starts the fresh turn, pre-prompt ordering confirmed (triggering prompt on the branch when `/fresh` runs; blocking semantics of the awaited first turn observed).
-1. **JSONL reader + `recall`/`recall_get`** with fixture-based tests (tree entries, abandoned branches, partial trailing line, budgets, caps). Exit: unit tests green, including the scan-budget truncation markers.
-2. **Pointer generator** shared by both call sites, with the self-sufficiency line. Exit: golden-file tests for both outputs.
-3. **`/fresh` switch path**: payload handoff, pending-message guard, pre-flight, cancellation and throw handling, degraded notices. Exit: manual `/fresh` works; a forced cancellation notifies and leaves pointer mode intact.
-4. **Three triggers wired**: threshold (mid-run and boundary), pre-prompt, overflow; double-queue guard; switch-pending detection. Exit: per-trigger integration tests for all three reasons, plus the fallback-path test (switch cancelled → pointer mode).
-5. **TUI**: renderer and notices; headless-mode test for RPC.
-6. **Install layout + README** (cost table, `--no-session` and print-mode limits, disable-compatibility) and the success-criteria measurements.
-
-## De-risking (folded into Stage 0's exit criteria)
-
-1. Prove the deferred dispatch live — the one source-inferred mechanism.
-2. Verify the race where `/fresh` executes while the auto-compaction abort controller is still set (extension commands bypass the prompt guard; confirm no conflict).
-3. Confirm the runtime accepts `firstKeptEntryId: undefined` from the hook (types say `string`; cast if needed).
+0. **Spike, retained as an integration test**: deferred dispatch + retain-none + confirmed arming + switch on a synthetic session. Exit criteria — all hard gates: switch lands, no deadlock, aborted turn persisted, pointer prompt starts the fresh turn; pre-prompt ordering confirmed (triggering prompt on the branch when `/fresh` runs); blocking semantics of the awaited first turn observed; **the abort-controller race** (`/fresh` executing while the auto-compaction abort controller is set) shows no conflict; **`firstKeptEntryId: undefined` accepted by the runtime** — if rejected, the named fallback applies: retain-tail pointer compaction (keep `preparation.firstKeptEntryId`; pointer + recent tail, still zero LLM cost, still lossless), and the fresh session's pointer prompt is unchanged. Later stages may not proceed until this gate passes.
+1. **JSONL reader + `recall`/`recall_get`** with fixture-based tests (tree entries, abandoned branches, partial trailing line, per-file ID collisions, chain validation violations, budgets, caps, paging). Exit: unit tests green, including budget truncation markers and the invalid-ancestor notice.
+2. **Pointer generator** shared by both call sites, with chain-walk budgets and the self-sufficiency line. Exit: golden-file tests for both outputs, including the budget-exhausted TOC marker and the minimal-pointer fallback for an unreadable ancestor.
+3. **`/fresh` switch path**: armed-payload consumption, queued-input drain with re-check and residual notice, pre-flight (filesystem + model/auth), cancellation and throw handling, first-turn-failure notice. Exit: manual `/fresh` works; a forced cancellation notifies and leaves pointer mode intact; a simulated first-turn failure reports "switched, continuation failed"; a two-handler arbitration test (another `session_before_compact` handler cancels/overrides) shows no switch and no spurious arming.
+4. **Triggers and contracts**: threshold (mid-run and boundary), pre-prompt, overflow, wired to confirmed arming; double-queue guard; switch-pending detection; compaction-disabled notify. Exit: per-trigger integration tests for all three reasons; a test at `compaction.enabled: false` shows the notify and no dead-end; a test submitting input during the switch observes the residual notice.
+5. **TUI**: renderer and notices; headless test for RPC; json/print mode test shows pointer compaction with no dispatch and no spurious degraded notice.
+6. **Install layout + README**: cost table with model/prices from the success-criteria runs, `--no-session`/print/json limits, disable-compatibility, disk-growth and retention policy.
 
 ## What's left to the builder
 
