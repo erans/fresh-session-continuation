@@ -1,6 +1,6 @@
 import { createReadStream } from "node:fs";
 import { createInterface } from "node:readline";
-import { readFileSync } from "node:fs";
+import { closeSync, openSync, readSync } from "node:fs";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { STATE_RECORD_TYPE } from "./notices.js";
 
@@ -60,12 +60,17 @@ export async function* streamEntries(file: string): AsyncGenerator<SessionEntry>
 	// stream ended: a pending failure is a tolerated partial trailing line
 }
 
-/** Parse a session file's header; null when the file is missing or unreadable. */
+/** Parse a session file's header; null when the file is missing or unreadable.
+ * Reads a bounded prefix — never the whole file. */
 export function parseSessionHeader(
 	file: string,
 ): { id: string; cwd: string; parentSession?: string } | null {
+	let fd: number | undefined;
 	try {
-		const first = readFileSync(file, "utf8").split("\n", 1)[0];
+		fd = openSync(file, "r");
+		const buf = Buffer.alloc(65_536);
+		const n = readSync(fd, buf, 0, buf.length, 0);
+		const first = buf.subarray(0, n).toString("utf8").split("\n", 1)[0];
 		if (!first?.trim()) return null;
 		const header = JSON.parse(first) as { type: string; id?: string; cwd?: string; parentSession?: string };
 		if (header.type !== "session") return null;
@@ -76,6 +81,8 @@ export function parseSessionHeader(
 		};
 	} catch {
 		return null;
+	} finally {
+		if (fd !== undefined) closeSync(fd);
 	}
 }
 
