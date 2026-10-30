@@ -4,26 +4,29 @@ import { closeSync, openSync, readSync } from "node:fs";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { STATE_RECORD_TYPE } from "./notices.js";
 /**
- * The last `n` entries of a file's history after its newest compaction entry
- * (the compaction boundary resets the window), skipping entries the caller
- * excludes — state records are always excluded for recall purposes.
+ * The last `n` entries of a file's history before its newest compaction
+ * entry (the spec's tail boundary: the moved-out work is what came before
+ * the pointer). Without a compaction entry, the last `n` of the whole file.
+ * State records are always skipped.
  */
 export async function tailEntries(
 	file: string,
 	n: number,
 	skip: (entry: SessionEntry) => boolean = () => false,
 ): Promise<SessionEntry[]> {
-	const window: SessionEntry[] = [];
+	let window: SessionEntry[] = [];
+	let tailBeforeCompaction: SessionEntry[] | null = null;
 	for await (const entry of streamEntries(file)) {
 		if (entry.type === "compaction") {
-			window.length = 0; // newest compaction entry wins: history before it is out
+			tailBeforeCompaction = window; // newest compaction entry wins
+			window = [];
 			continue;
 		}
 		if (skip(entry) || isStateRecordEntry(entry)) continue;
 		window.push(entry);
 		if (window.length > n) window.shift();
 	}
-	return window;
+	return tailBeforeCompaction ?? window;
 }
 
 interface ImageLike {

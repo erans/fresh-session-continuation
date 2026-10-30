@@ -11,6 +11,8 @@ export interface BuilderOptions {
 	parentSession?: string;
 }
 
+let globalTick = 0;
+
 export class SessionBuilder {
 	private entries: Record<string, unknown>[] = [];
 	private lastId: string | null = null;
@@ -20,6 +22,11 @@ export class SessionBuilder {
 		private readonly name: string,
 		private readonly opts: BuilderOptions = {},
 	) {}
+
+	private stamp(): string {
+		globalTick += 1;
+		return new Date(1_700_000_000_000 + globalTick).toISOString();
+	}
 
 	private nextParent(explicit?: string | null): string | null {
 		return explicit === undefined ? this.lastId : explicit;
@@ -34,7 +41,7 @@ export class SessionBuilder {
 			type: "message",
 			id,
 			parentId: this.nextParent(parentId),
-			timestamp: new Date().toISOString(),
+			timestamp: this.stamp(),
 			message: { role: "user", content, timestamp: Date.now() },
 		});
 		this.lastId = id;
@@ -46,7 +53,7 @@ export class SessionBuilder {
 			type: "message",
 			id,
 			parentId: this.nextParent(parentId),
-			timestamp: new Date().toISOString(),
+			timestamp: this.stamp(),
 			message: {
 				role: "assistant",
 				content: [{ type: "text", text }],
@@ -73,7 +80,7 @@ export class SessionBuilder {
 			type: "message",
 			id,
 			parentId: this.nextParent(parentId),
-			timestamp: new Date().toISOString(),
+			timestamp: this.stamp(),
 			message: {
 				role: "toolResult",
 				toolCallId,
@@ -96,7 +103,7 @@ export class SessionBuilder {
 			type: "compaction",
 			id,
 			parentId: this.nextParent(parentId),
-			timestamp: new Date().toISOString(),
+			timestamp: this.stamp(),
 			...fields,
 		});
 		this.lastId = id;
@@ -108,7 +115,7 @@ export class SessionBuilder {
 			type: "custom",
 			id,
 			parentId: this.nextParent(parentId),
-			timestamp: new Date().toISOString(),
+			timestamp: this.stamp(),
 			customType,
 			data,
 		});
@@ -129,7 +136,7 @@ export class SessionBuilder {
 			type: "session",
 			version: 3,
 			id: this.name.replace(/\.jsonl$/, ""),
-			timestamp: new Date().toISOString(),
+			timestamp: this.stamp(),
 			cwd: this.opts.cwd ?? this.dir,
 			...(this.opts.parentSession ? { parentSession: this.opts.parentSession } : {}),
 		};

@@ -81,7 +81,7 @@ describe("state records", () => {
 			.write();
 
 		const tail = await tailEntries(file, 4, () => false);
-		expect(tail.map((e) => (e as { id: string }).id)).toEqual(["u2", "a2"]);
+		expect(tail.map((e) => (e as { id: string }).id)).toEqual(["u1", "a1"]);
 	});
 
 	it("clearing rules: which exits append a cleared record", () => {
