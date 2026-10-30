@@ -21,6 +21,7 @@ Why: compaction today spends a full-context LLM call (measured elsewhere: 29–3
 - No summaries, embeddings, vector indexes, or curated "memory". The model gets the raw record plus tools (the bitter-lesson stance).
 - No cross-project knowledge base. `recall` reads session JSONL files only.
 - No pi-core changes. Extension only.
+- Branch summarization (`/tree`, `session_before_tree`) keeps pi's default behavior; out of scope for v1.
 
 ## Anti-goals
 
@@ -55,6 +56,12 @@ Why: compaction today spends a full-context LLM call (measured elsewhere: 29–3
 5. `/fresh` command executes (immediately, even while streaming): capture the old session file path, last user message, and TOC as plain data; call `ctx.newSession({ parentSession, withSession: rc => rc.sendUserMessage(pointerPrompt) })`.
 6. The pointer prompt is auto-submitted as the fresh session's first message → the first turn starts by itself; the agent recalls what it needs.
 
+Switch timing (decided): the switch lands **mid-run** — the literal Mainplane moment, not at run end. The aborted in-flight request is the *first* request after the pointer landed, so its input is the tiny pointer context, not the old one; the waste is cents. The fresh session visibly continues the interrupted task, which is the product's point. At-run-end switching was rejected: it saves one partial request but leaves the fresh session with no task and delays the file boundary.
+
+### Contract: pi's compaction trigger stays enabled
+
+The extension replaces the **summarization LLM call**, not the trigger machinery. All three trigger points (threshold between turns, pre-prompt check, overflow recovery) live inside pi's compaction machinery; with `compaction.enabled: false` the hook never fires and a full context dead-ends. On `session_start`, if compaction is disabled, notify prominently that the extension requires the machinery enabled (the default). A private threshold watcher (`turn_end` + `getContextUsage()` + `ctx.compact()`) was rejected: a duplicate engine with its own race surface.
+
 ### Manual `/compact` (`reason: "manual"`)
 
 - Bare `/compact` → pointer compaction (retain-none), no auto-switch: the user asked to compact *this* session.
@@ -65,7 +72,7 @@ Why: compaction today spends a full-context LLM call (measured elsewhere: 29–3
 Mechanical, lossless, no LLM:
 
 - absolute path of the old session file, and that the record is complete and verbatim;
-- the **last user message verbatim**, marked "you were mid-task; resume this";
+- the **last user message verbatim**, marked "you were mid-task; resume this"; for the `/fresh` prompt, re-attach that message's image blocks too (`sendUserMessage` accepts `ImageContent`) so multimodal tasks keep their inputs;
 - a TOC: first line of every user message on the active branch, rebuilt from the parent-chain files so it is **cumulative** (an index, not a summary; size-capped with a truncation marker);
 - files read/modified, taken from `preparation.fileOps` (same mechanical extraction pi's compaction already uses);
 - usage instruction: "Do not re-ask the user. When you need the exact error message, file path, number, or prior decision, search the record with `recall` instead of re-deriving."
@@ -81,7 +88,8 @@ Mechanical, lossless, no LLM:
 - Switch cancelled or failed (another extension cancels `session_before_switch`, a headless-mode quirk, a thrown command) → the safety net already landed; the run continues in place, losslessly. Notify which flavor took effect (guarded by `ctx.hasUI`).
 - Overflow recovery (`willRetry: true`) → same flow; if the switch loses the race, the retried turn proceeds on pointer context.
 - Double-threshold guard: never queue `/fresh` twice.
-- Images: `recall` returns text only (documented limit).
+- Images: `recall` returns text only (documented limit); the switch itself re-attaches the last user message's images.
+- Queued steering: in the threshold path, queued steering is delivered and persisted during `prepareNextTurn` before the deferred `/fresh` fires, so nothing is lost. A manual mid-stream `/fresh` can drop unconsumed queued input (the queue is in-memory and not publicly readable) — documented edge.
 - RPC/JSON modes: `prompt()` dispatches commands headlessly; the flow works without a TUI.
 
 ### TUI
