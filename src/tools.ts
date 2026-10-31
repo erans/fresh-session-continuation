@@ -211,7 +211,12 @@ export function makeRecallTool(opts: { budget?: ChainBudget } = {}) {
 				scanFiles = [params.file];
 			}
 
-			const walk = await resolveChain(sessionFile, sessionDir, budget);
+			// a cursor call resumes the walk at the cursor's file: a fresh depth
+			// budget per call, so continuation reaches past one walk's depth
+			const resumeFrom = hasCursor
+				? scanFiles[Math.max(0, Math.min(chainIndex, scanFiles.length - 1))]
+				: sessionFile;
+			const walk = await resolveChain(resumeFrom, sessionDir, budget);
 			const walkFiles = walk.targets.map((t) => t.file);
 			const startAt = Math.max(0, Math.min(chainIndex, scanFiles.length - 1));
 			const filesToScan = scanFiles.filter(
@@ -277,6 +282,11 @@ export function makeRecallTool(opts: { budget?: ChainBudget } = {}) {
 			}
 			if (walk.reason && walk.stoppedAt && !unscanned.includes(walk.stoppedAt)) {
 				unscanned.push(`${walk.stoppedAt} (beyond walk: ${walk.reason})`);
+				// a budget stop is resumable: the cursor restarts the walk at the
+				// stopped file with a fresh per-call budget (invalid/cycle stops are not)
+				if (walk.reason === "budget" && !cutAt && ancestryFiles.includes(walk.stoppedAt)) {
+					cutAt = { file: walk.stoppedAt };
+				}
 			}
 
 			// newest-first interleave with a per-file floor while the limit is unspent
