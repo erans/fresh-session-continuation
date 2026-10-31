@@ -179,6 +179,35 @@ export function entryImages(entry: SessionEntry): ImageLike[] {
 	return imageBlocks(message.content);
 }
 
+/**
+ * The leaf-path entries of a session file: the path from its last entry
+ * (pi re-derives the leaf as the file's last entry) back to the root, in
+ * root→leaf order. The id index is built while streaming under a byte
+ * budget; a budget cut yields the entries read so far.
+ */
+export async function leafPathEntries(
+	file: string,
+	maxBytes: number,
+): Promise<SessionEntry[]> {
+	const byId = new Map<string, SessionEntry>();
+	let last: SessionEntry | null = null;
+	let bytes = 0;
+	for await (const entry of streamEntries(file)) {
+		bytes += 512;
+		byId.set(entry.id, entry);
+		last = entry;
+		if (bytes > maxBytes) break;
+	}
+	const path: SessionEntry[] = [];
+	let cursor: SessionEntry | null = last;
+	while (cursor) {
+		path.unshift(cursor);
+		const parentId = (cursor as unknown as { parentId: string | null }).parentId;
+		cursor = parentId ? (byId.get(parentId) ?? null) : null;
+	}
+	return path;
+}
+
 /** First line of a user entry's first text block; null for anything else. */
 export function firstUserLine(entry: SessionEntry): string | null {
 	const message = asMessage(entry);

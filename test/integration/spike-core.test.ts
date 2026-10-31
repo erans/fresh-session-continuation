@@ -4,8 +4,9 @@ import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { createTestSession } from "../harness/session.js";
 import freshExtension from "../../src/index.js";
-import { PLACEHOLDER_STATIC } from "../../src/spike.js";
 import { STATE_RECORD_TYPE } from "../../src/notices.js";
+
+const STATIC_HEADER = "Previous session (complete, verbatim record):";
 
 const root = mkdtempSync(join(tmpdir(), "fresh-spike-"));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
@@ -57,7 +58,8 @@ describe("spike: core mechanism", () => {
 			// our static text plus the task — never an LLM summary.
 			const compaction = parseJsonl(oldFile).find((e) => e.type === "compaction");
 			expect(compaction).toBeTruthy();
-			expect(compaction!.summary.startsWith(PLACEHOLDER_STATIC)).toBe(true);
+			expect(compaction!.summary.startsWith(STATIC_HEADER)).toBe(true);
+			expect(compaction!.summary).toContain(oldFile);
 			expect(compaction!.summary).toContain("do the thing");
 			expect(compaction!.firstKeptEntryId).toBe(compaction!.id);
 
@@ -72,7 +74,7 @@ describe("spike: core mechanism", () => {
 			const firstUser = freshEntries.find(
 				(e) => e.type === "message" && e.message.role === "user",
 			);
-			expect(JSON.stringify(firstUser?.message.content)).toContain(PLACEHOLDER_STATIC);
+			expect(JSON.stringify(firstUser?.message.content)).toContain(STATIC_HEADER);
 			expect(JSON.stringify(firstUser?.message.content)).toContain("do the thing");
 
 			// The fresh session's first turn runs by itself.
@@ -108,7 +110,7 @@ describe("spike: core mechanism", () => {
 				id: "c1",
 				parentId: "m1",
 				timestamp: now,
-				summary: `${PLACEHOLDER_STATIC}\nlast user message: hello task`,
+				summary: `Previous session (complete, verbatim record): ${crafted}\nlast user message: hello task`,
 				firstKeptEntryId: "c1",
 				tokensBefore: 1,
 			}),

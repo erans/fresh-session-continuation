@@ -4,7 +4,6 @@ import { registerCompactionHook } from "./hook.js";
 import { registerFreshCommand } from "./fresh.js";
 import { registerRecovery, registerTreeHandler } from "./recovery.js";
 
-export { PLACEHOLDER_STATIC, renderVolatilePlaceholder } from "./spike.js";
 export { STATE_RECORD_TYPE } from "./notices.js";
 
 /**

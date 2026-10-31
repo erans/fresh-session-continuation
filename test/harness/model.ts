@@ -15,6 +15,8 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 export interface TurnScript {
 	text?: string;
 	toolCalls?: { name: string; args: Record<string, unknown> }[];
+	/** Serve a provider error for this turn instead of content. */
+	error?: string;
 }
 
 /** What the harness records for every model call it serves. */
@@ -92,6 +94,16 @@ export function createFakeProvider(turns: TurnScript[], log: FakeCall[]): (pi: E
 						name: call.name,
 						arguments: call.args as never,
 					});
+				}
+				if (script.error) {
+					const errorMessage = makeMessage(model, [{ type: "text", text: script.error }], "stop");
+					const stream = createAssistantMessageEventStream();
+					stream.push({
+						type: "error",
+						reason: "error",
+						error: { ...errorMessage, stopReason: "error", errorMessage: script.error },
+					});
+					return stream;
 				}
 				const stopReason: "stop" | "toolUse" = script.toolCalls?.length ? "toolUse" : "stop";
 				const message = makeMessage(model, content, stopReason);

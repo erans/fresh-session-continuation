@@ -77,6 +77,7 @@ export function registerRecovery(pi: ExtensionAPI, st: SwitchStateInstance): voi
 
 	pi.on("agent_end", async (_event, ctx) => {
 		if (st.getState() !== "armed") return; // in-flight never triggers
+		if (st.getDispatchQueued()) return; // dispatch still queued: not never-dispatched
 		const file = ctx.sessionManager.getSessionFile();
 		if (!file) return;
 		const payload = st.getPayload();
