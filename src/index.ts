@@ -3,6 +3,7 @@ import { createSwitchState } from "./state.js";
 import { registerCompactionHook } from "./hook.js";
 import { registerFreshCommand } from "./fresh.js";
 import { registerRecovery, registerTreeHandler } from "./recovery.js";
+import { registerTui } from "./tui.js";
 import { makeRecallGetTool, makeRecallTool } from "./tools.js";
 import { NOTICES } from "./notices.js";
 
@@ -22,6 +23,7 @@ export default function freshSessionExtension(pi: ExtensionAPI): void {
 	registerFreshCommand(pi, st);
 	registerTreeHandler(pi, st);
 	registerRecovery(pi, st);
+	registerTui(pi);
 	pi.registerTool(makeRecallTool());
 	pi.registerTool(makeRecallGetTool());
 

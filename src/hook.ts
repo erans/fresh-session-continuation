@@ -115,6 +115,7 @@ export function registerCompactionHook(pi: ExtensionAPI, st: SwitchStateInstance
 		if (!oldSessionPath || !lastStatic) return;
 
 		const payload = { oldSessionPath, pointerTextStatic: lastStatic };
+		// the armed record always persists (crash-safety for a later interactive restart)
 		appendStateRecord(pi, {
 			state: "armed",
 			owner: oldSessionPath,
@@ -122,13 +123,16 @@ export function registerCompactionHook(pi: ExtensionAPI, st: SwitchStateInstance
 			pointerTextStatic: lastStatic,
 			armedAt: Date.now(),
 		});
+		if (ctx.mode !== "tui" && ctx.mode !== "rpc") {
+			// print/json: pointer compaction only — no in-memory arm, so the
+			// never-dispatched detection stays silent (nothing should dispatch)
+			return;
+		}
 		if (st.getState() === "in-flight") {
 			st.refreshInFlight(payload); // process-local refresh; record keeps its original armedAt
 			return;
 		}
 		st.arm(payload);
-
-		if (ctx.mode !== "tui" && ctx.mode !== "rpc") return; // print/json: pointer compaction only
 		queueDispatch(pi, st, (m) => ctx.ui.notify(m));
 	});
 

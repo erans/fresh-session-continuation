@@ -45,6 +45,8 @@ export interface CreateTestSessionOptions {
 	compactionEnabled?: boolean;
 	/** Fake model context window (default 2000). Raise it to keep manual tests off the auto-compaction cliff. */
 	contextWindow?: number;
+	/** Extension bind mode (default "rpc"). "print"/"json" stage the pointer-compaction-only paths. */
+	mode?: "tui" | "rpc" | "json" | "print";
 }
 
 function makeCaptureUI(notices: string[]): ExtensionUIContext {
@@ -124,7 +126,7 @@ export async function createTestSession(opts: CreateTestSessionOptions): Promise
 		const session = runtime.session;
 		await session.bindExtensions({
 			uiContext,
-			mode: "rpc",
+			mode: opts.mode ?? "rpc",
 			commandContextActions: {
 				waitForIdle: () => session.waitForIdle(),
 				newSession: (options) => runtime.newSession(options),
