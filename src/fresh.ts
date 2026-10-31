@@ -36,6 +36,7 @@ export function lastStepGuard(st: SwitchStateInstance, notify: (m: string) => vo
 interface BranchLikeCtx {
 	sessionManager: {
 		getBranch: () => SessionEntry[];
+		getSessionFile?: () => string | undefined;
 	};
 	signal?: AbortSignal | undefined;
 }
@@ -112,10 +113,12 @@ export async function captureBranchSnapshot(
 	}
 
 	const assistantText = lastAssistant ? textOf(messageOf(lastAssistant)?.content) : "";
+	const anchorFile = ctx.sessionManager.getSessionFile?.() ?? "";
 	const anchor: Anchor = {
 		lastAssistantText: assistantText,
+		// the ids AND file, per spec: the refs are directly recall_get-replayable
 		entryRefs: lastAssistant
-			? [{ file: "", entryId: (lastAssistant as unknown as { id: string }).id }]
+			? [{ file: anchorFile, entryId: (lastAssistant as unknown as { id: string }).id }]
 			: [],
 	};
 	return {
@@ -225,9 +228,11 @@ export function registerFreshCommand(pi: ExtensionAPI, st: SwitchStateInstance):
 					});
 				}
 
-				const result = await ctx.newSession({
-					parentSession: oldSessionPath,
-					withSession: async (rc) => {
+				let result: Awaited<ReturnType<typeof ctx.newSession>>;
+				try {
+					result = await ctx.newSession({
+						parentSession: oldSessionPath,
+						withSession: async (rc) => {
 						const newFile = rc.sessionManager.getSessionFile();
 						if (newFile) rc.ui.notify(NOTICES.switch(newFile, oldSessionPath));
 						try {
@@ -237,20 +242,27 @@ export function registerFreshCommand(pi: ExtensionAPI, st: SwitchStateInstance):
 							rc.ui.notify(NOTICES.continuationFailed(message));
 							return;
 						}
-						// a provider error resolves the turn instead of rejecting: scan its outcome
-						const branch = rc.sessionManager.getBranch();
-						for (let i = branch.length - 1; i >= 0; i--) {
-							const entry = branch[i];
-							if (entry.type !== "message") continue;
-							const msg = (entry as unknown as { message?: { role: string; stopReason?: string; errorMessage?: string } }).message;
-							if (msg?.role !== "assistant") continue;
-							if (msg.stopReason === "error") {
-								rc.ui.notify(NOTICES.continuationFailed(msg.errorMessage ?? "first turn failed"));
+							// a provider error resolves the turn instead of rejecting: scan its outcome
+							const branch = rc.sessionManager.getBranch();
+							for (let i = branch.length - 1; i >= 0; i--) {
+								const entry = branch[i];
+								if (entry.type !== "message") continue;
+								const msg = (entry as unknown as { message?: { role: string; stopReason?: string; errorMessage?: string } }).message;
+								if (msg?.role !== "assistant") continue;
+								if (msg.stopReason === "error") {
+									rc.ui.notify(NOTICES.continuationFailed(msg.errorMessage ?? "first turn failed"));
+								}
+								break;
 							}
-							break;
-						}
-					},
-				});
+						},
+					});
+				} catch (error) {
+					// a pre-teardown throw must not escape the command handler:
+					// notify and stay on pointer mode
+					const message = error instanceof Error ? error.message : String(error);
+					ctx.ui.notify(NOTICES.degraded(message));
+					return;
+				}
 
 				if (result.cancelled) {
 					// no replacement happened; the record was already cleared at the commit point

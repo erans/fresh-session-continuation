@@ -139,3 +139,33 @@ describe("pointer renderers", () => {
 		expect(text).toContain("read/bash tools");
 	});
 });
+
+describe("review-fix regressions", () => {
+	it("H2: huge file lists truncate to keep the pointer under the cap, with a loud marker", () => {
+		const out = renderPointerStatic({
+			oldSessionPath: "/old/session.jsonl",
+			toc: [{ entryId: "u1", file: "/old/session.jsonl", line: "the task", timestamp: "2026-10-30T10:00:00Z" }],
+			readFiles: Array.from({ length: 400 }, (_, i) => `/repo/src/module-${i}.ts`),
+			modifiedFiles: Array.from({ length: 200 }, (_, i) => `/repo/src/gen-${i}.ts`),
+		});
+		expect(Buffer.byteLength(out, "utf8")).toBeLessThanOrEqual(16_384);
+		expect(out).toContain("/old/session.jsonl"); // path never truncated
+		expect(out).toContain("more not listed — recall the record for them");
+		// the first entries survive, the deep ones fold into the marker
+		expect(out).toContain("module-0.ts");
+		expect(out).not.toContain("module-399.ts");
+	});
+
+	it("M2: unindexed chain members are named with the spec's loud marker", () => {
+		const out = renderPointerStatic({
+			oldSessionPath: "/old/session.jsonl",
+			toc: [{ entryId: "u1", file: "/old/session.jsonl", line: "the task", timestamp: "2026-10-30T10:00:00Z" }],
+			readFiles: [],
+			modifiedFiles: [],
+			exhaustedAfter: ["/old/gen-9.jsonl"],
+		});
+		expect(out).toContain(
+			"older sessions not indexed here: gen-9.jsonl — search them with recall, which continues past its budget via cursor",
+		);
+	});
+});

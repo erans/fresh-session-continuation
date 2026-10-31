@@ -8,6 +8,8 @@ Previous session (complete, verbatim record): /sessions/old.jsonl
 ## Instructions
 Do not re-ask the user. When you need the exact error message, file path, number, or prior decision, search the record with `recall` instead of re-deriving — if a search reports unscanned files, continue it with the returned cursor.
 
+The index covers the main line; recall also searches abandoned attempts.
+
 If the `recall` tool is not available (extension disabled), read the session file directly with the read/bash tools.
 
 You were mid-task; resume this.

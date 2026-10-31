@@ -1,3 +1,4 @@
+import { basename } from "node:path";
 import { POINTER_BUDGET } from "./chain.js";
 import { firstUserLine } from "./reader.js";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
@@ -23,6 +24,8 @@ export interface StaticInput {
 	toc: TocEntry[];
 	readFiles: string[];
 	modifiedFiles: string[];
+	/** chain members the TOC walk could not index (budget stop) — named loudly */
+	exhaustedAfter?: string[];
 }
 
 export interface Anchor {
@@ -42,6 +45,9 @@ const INSTRUCTIONS =
 
 const SELF_SUFFICIENCY =
 	"If the `recall` tool is not available (extension disabled), read the session file directly with the read/bash tools.";
+
+const ABANDONED_BRANCHES =
+	"The index covers the main line; recall also searches abandoned attempts.";
 
 function bytes(text: string): number {
 	return Buffer.byteLength(text, "utf8");
@@ -63,24 +69,62 @@ export function renderPointerStatic(input: StaticInput): string {
 	);
 	const fileSection = (title: string, files: string[]) =>
 		files.length ? `\n${title}:\n${files.map((f) => `- ${f}`).join("\n")}\n` : "";
-	const files = fileSection("Files read", input.readFiles) + fileSection("Files modified", input.modifiedFiles);
-	const tail = `\n## Instructions\n${INSTRUCTIONS}\n\n${SELF_SUFFICIENCY}\n`;
+	const tail = `\n## Instructions\n${INSTRUCTIONS}\n\n${ABANDONED_BRANCHES}\n\n${SELF_SUFFICIENCY}\n`;
 
-	// Budget the TOC: the fixed parts are untouchable, the TOC shrinks.
+	// M2: chain members the walk could not index are named, never silent
+	const exhaustedMarker = (input.exhaustedAfter?.length ?? 0) > 0
+		? [
+				`- older sessions not indexed here: ${(input.exhaustedAfter ?? []).map((f) => basename(f)).join(", ")} — search them with recall, which continues past its budget via cursor`,
+			]
+		: [];
+
+	// Budget the TOC: the fixed parts are untouchable, the TOC shrinks first,
+	// then the file lists truncate (first N + a loud remainder marker).
 	const marker = (dropped: number) =>
 		dropped > 0
 			? [`- older sessions not indexed here: ${dropped} entr${dropped === 1 ? "y" : "ies"} dropped to fit the pointer cap — search them with recall, which continues past its budget via cursor\n`]
 			: [];
+	const truncatedFileSection = (title: string, files2: string[]) => {
+		const rendered = fileSection(title, files2);
+		if (bytes(rendered) === 0) return () => rendered;
+		return (keep: number) =>
+			keep >= files2.length
+				? rendered
+				: `${fileSection(title, files2.slice(0, keep))}\n${files2.length - keep} more not listed — recall the record for them\n`;
+	};
+	const readFilesRender = truncatedFileSection("Files read", input.readFiles);
+	const modifiedFilesRender = truncatedFileSection("Files modified", input.modifiedFiles);
 	let drop = 0;
+	let keepRead = input.readFiles.length;
+	let keepModified = input.modifiedFiles.length;
 	let toc: string;
+	let filesOut: string;
 	// eslint-disable-next-line no-constant-condition
 	while (true) {
-		toc = `\n## Index of user messages\n${[...tocLines.slice(0, tocLines.length - drop), ...marker(drop)].join("\n")}\n`;
-		const total = bytes(header + toc + files + tail);
-		if (total <= STATIC_TARGET_BYTES || drop >= tocLines.length) break;
-		drop++;
+		toc = `\n## Index of user messages\n${[
+			...tocLines.slice(0, tocLines.length - drop),
+			...exhaustedMarker,
+			...marker(drop),
+		].join("\n")}\n`;
+		filesOut = readFilesRender(keepRead) + modifiedFilesRender(keepModified);
+		const total = bytes(header + toc + filesOut + tail);
+		if (total <= STATIC_TARGET_BYTES) break;
+		if (drop < tocLines.length) {
+			drop++;
+			continue;
+		}
+		// TOC exhausted: truncate the file lists one entry at a time
+		if (keepRead > 0) {
+			keepRead--;
+			continue;
+		}
+		if (keepModified > 0) {
+			keepModified--;
+			continue;
+		}
+		break; // only the path and instructions remain: never truncated
 	}
-	return header + toc + files + tail;
+	return header + toc + filesOut + tail;
 }
 
 /**

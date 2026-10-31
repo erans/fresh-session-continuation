@@ -98,7 +98,7 @@ Real-model rows — fill from a run with your model and price table:
 
 ```sh
 npx tsc --noEmit   # types
-npx vitest run      # 85 tests: unit + integration (harness with a scripted fake provider)
+npx vitest run      # 92 tests: unit + integration (harness with a scripted fake provider)
 npx tsx scripts/fixture-session.ts   # generate the reference fixture
 npx tsx scripts/measure.ts           # print the measurement table
 ```

@@ -64,12 +64,29 @@ function imageBlocks(content: MessageLike["content"]): ImageLike[] {
  * a malformed interior line throws.
  */
 export async function* streamEntries(file: string): AsyncGenerator<SessionEntry> {
+	for await (const item of streamEntryLines(file)) yield item.entry;
+}
+
+/**
+ * Like streamEntries, but yields the real line byte length with each entry
+ * (budget accounting counts actual bytes, not per-entry amortization) and can
+ * resume at a byte offset: lines are counted and discarded — never parsed —
+ * until the offset is crossed, so skipping a large prefix stays cheap. The
+ * offset snaps forward to the next full line.
+ */
+export async function* streamEntryLines(
+	file: string,
+	startByte = 0,
+): AsyncGenerator<{ entry: SessionEntry; lineBytes: number }> {
 	const rl = createInterface({
 		input: createReadStream(file, { encoding: "utf8" }),
 		crlfDelay: Infinity,
 	});
 	let pending: Error | null = null;
+	let seen = 0;
 	for await (const line of rl) {
+		seen += Buffer.byteLength(line, "utf8") + 1; // + newline
+		if (startByte > 0 && seen <= startByte) continue; // cheap skip, no parsing
 		if (!line.trim()) continue;
 		if (pending) throw pending; // a further line arrived: the bad one was interior
 		let entry: SessionEntry | null = null;
@@ -80,7 +97,7 @@ export async function* streamEntries(file: string): AsyncGenerator<SessionEntry>
 			continue;
 		}
 		if ((entry as unknown as { type: string }).type === "session") continue;
-		yield entry;
+		yield { entry, lineBytes: Buffer.byteLength(line, "utf8") + 1 };
 	}
 	// stream ended: a pending failure is a tolerated partial trailing line
 }
@@ -192,8 +209,8 @@ export async function leafPathEntries(
 	const byId = new Map<string, SessionEntry>();
 	let last: SessionEntry | null = null;
 	let bytes = 0;
-	for await (const entry of streamEntries(file)) {
-		bytes += 512;
+	for await (const { entry, lineBytes } of streamEntryLines(file)) {
+		bytes += lineBytes;
 		byId.set(entry.id, entry);
 		last = entry;
 		if (bytes > maxBytes) break;

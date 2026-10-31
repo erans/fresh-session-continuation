@@ -80,7 +80,7 @@ describe("/fresh full path", () => {
 			const runDone = s.session
 				.prompt("do the big task", { streamingBehavior: "followUp" } as never)
 				.catch(() => {});
-			await new Promise((r) => setTimeout(r, 150));
+			// queue immediately: the drain must not depend on wall-clock timing
 			await s.session.prompt("queued question", { streamingBehavior: "followUp" } as never).catch(() => {});
 			await runDone;
 			await waitFor(() => sessionFiles(sessionDir).length >= 2, 20_000);
@@ -162,9 +162,10 @@ describe("/fresh full path", () => {
 		expect(notice).toBe(NOTICES.newestPrompt());
 	});
 
-	it("a quiet branch captures without polling or notice", async () => {
+	it("a quiet branch captures without polling or notice; the anchor names its file (L1)", async () => {
 		const ctx = {
 			sessionManager: {
+				getSessionFile: () => "/sessions/old.jsonl",
 				getBranch: () => [
 					{ type: "message", id: "u1", parentId: null, timestamp: "2026-10-30T10:00:00Z", message: { role: "user", content: "the task", timestamp: 1 } },
 					{ type: "message", id: "a1", parentId: "u1", timestamp: "2026-10-30T10:00:01Z", message: { role: "assistant", content: [{ type: "text", text: "step done" }], timestamp: 2 } },
@@ -176,5 +177,53 @@ describe("/fresh full path", () => {
 		expect(volatile.lastUserMessage).toBe("the task");
 		expect(volatile.anchor.lastAssistantText).toBe("step done");
 		expect(notice).toBeUndefined();
+		// the anchor's entry refs are directly recall_get-replayable: id AND file
+		expect(volatile.anchor.entryRefs[0]?.file).toBe("/sessions/old.jsonl");
+		expect(volatile.anchor.entryRefs[0]?.entryId).toBe("a1");
+	});
+
+	it("M5: a newSession throw before teardown degrades loudly and stays on pointer mode", async () => {
+		// unit-staged /fresh: everything through the commit point, then the
+		// session-replacement call rejects
+		const { mkdtempSync: mkd, rmSync: rm } = await import("node:fs");
+		const dir = mkdtmp();
+		function mkdtmp() {
+			return mkd(join(tmpdir(), "fresh-m5-"));
+		}
+		const file = new (await import("../fixtures/builder.js")).SessionBuilder(dir, "m5.jsonl")
+			.user("u1", "the task")
+			.write();
+		const notices: string[] = [];
+		let command: { handler: (args: string, ctx: unknown) => Promise<void> } | undefined;
+		const pi = {
+			registerCommand: (_name: string, cmd: { handler: (args: string, ctx: unknown) => Promise<void> }) => {
+				command = cmd;
+			},
+			on: () => {},
+			appendEntry: () => {},
+		} as never;
+		const { registerFreshCommand } = await import("../../src/fresh.js");
+		const { createSwitchState } = await import("../../src/state.js");
+		const st = createSwitchState();
+		registerFreshCommand(pi as never, st);
+		expect(command).toBeTruthy();
+
+		const ctx = {
+			ui: { notify: (m: string) => notices.push(m) },
+			sessionManager: {
+				getSessionFile: () => file,
+				getSessionDir: () => dir,
+				getBranch: () => [],
+			},
+			hasPendingMessages: () => false,
+			waitForIdle: () => Promise.resolve(),
+			model: { id: "fake-1" },
+			newSession: () => Promise.reject(new Error("boom: switch blew up")),
+			signal: undefined,
+		};
+		await command!.handler("", ctx as never);
+		expect(notices).toContain(NOTICES.degraded("boom: switch blew up"));
+		expect(st.getState()).toBe("idle");
+		rm(dir, { recursive: true, force: true });
 	});
 });

@@ -3,6 +3,7 @@ import { NOTICES } from "./notices.js";
 import {
 	assemblePrompt,
 	buildTocFromFiles,
+	minimalPointer,
 	renderPointerStatic,
 	renderVolatileBlock,
 	type Anchor,
@@ -37,6 +38,7 @@ export function registerCompactionHook(pi: ExtensionAPI, st: SwitchStateInstance
 			// static: path, TOC (own branch + ancestor leaf paths, budgeted), file lists
 			const sessionDir = ctx.sessionManager.getSessionDir();
 			const tocFiles = [{ file: sessionFile, entries: ctx.sessionManager.getBranch() }];
+			let exhaustedAfter: string[] = [];
 			if (sessionDir) {
 				const chain = await resolveChain(sessionFile, sessionDir, POINTER_BUDGET);
 				for (const target of chain.targets.slice(1)) {
@@ -45,8 +47,12 @@ export function registerCompactionHook(pi: ExtensionAPI, st: SwitchStateInstance
 						entries: await leafPathEntries(target.file, POINTER_BUDGET.maxBytes),
 					});
 				}
+				// a budget-stopped walk leaves ancestors unindexed: name them loudly
+				if (chain.reason === "budget" && chain.stoppedAt) exhaustedAfter = [chain.stoppedAt];
 			}
-			const { toc } = buildTocFromFiles(tocFiles, { maxTocEntries: 400 });
+			const { toc, exhaustedAfter: tocExhausted } = buildTocFromFiles(tocFiles, {
+				maxTocEntries: 400,
+			});
 			const fileOps = event.preparation.fileOps as {
 				read: Set<string>;
 				written: Set<string>;
@@ -57,10 +63,12 @@ export function registerCompactionHook(pi: ExtensionAPI, st: SwitchStateInstance
 				toc,
 				readFiles: [...fileOps.read],
 				modifiedFiles: [...new Set([...fileOps.edited, ...fileOps.written])],
+				exhaustedAfter: [...new Set([...exhaustedAfter, ...tocExhausted])],
 			});
 
-			// volatile: captured at hook time for the compaction-summary assembly
-			const snapshot = await captureBranchSnapshot(ctx);
+			// volatile: captured at hook time; no newest-prompt poll can help
+			// mid-compaction, so the hook's snapshot never polls
+			const snapshot = await captureBranchSnapshot(ctx, 0);
 			const summary = assemblePrompt(
 				staticText,
 				renderVolatileBlock({ ...snapshot.volatile, images: snapshot.volatile.images.slice(0, 4) }),
@@ -90,11 +98,11 @@ export function registerCompactionHook(pi: ExtensionAPI, st: SwitchStateInstance
 			// never let the hook throw: a throw silently reverts to the default LLM compaction
 			const message = error instanceof Error ? error.message : String(error);
 			ctx.ui.notify(NOTICES.minimalPointer(message));
-			const snapshot = await captureBranchSnapshot(ctx);
+			const snapshot = await captureBranchSnapshot(ctx, 0);
 			return {
 				compaction: {
 					summary: assemblePrompt(
-						minimalPointerText(sessionFile),
+						minimalPointer(sessionFile, snapshot.volatile.lastUserMessage),
 						renderVolatileBlock({ ...snapshot.volatile, images: [] }),
 					),
 					firstKeptEntryId:
@@ -115,7 +123,25 @@ export function registerCompactionHook(pi: ExtensionAPI, st: SwitchStateInstance
 		if (!oldSessionPath || !lastStatic) return;
 
 		const payload = { oldSessionPath, pointerTextStatic: lastStatic };
-		// the armed record always persists (crash-safety for a later interactive restart)
+		if (st.getState() === "in-flight") {
+			// process-local refresh only: the persisted record keeps its original
+			// armedAt and static, so the ~1 minute recovery bound never slides
+			st.refreshInFlight(payload);
+			return;
+		}
+		if (ctx.mode !== "tui" && ctx.mode !== "rpc") {
+			// print/json: the armed record persists (crash-safety for a later
+			// interactive restart) but nothing arms in-memory, so the
+			// never-dispatched detection stays silent (nothing should dispatch)
+			appendStateRecord(pi, {
+				state: "armed",
+				owner: oldSessionPath,
+				oldSessionPath,
+				pointerTextStatic: lastStatic,
+				armedAt: Date.now(),
+			});
+			return;
+		}
 		appendStateRecord(pi, {
 			state: "armed",
 			owner: oldSessionPath,
@@ -123,15 +149,6 @@ export function registerCompactionHook(pi: ExtensionAPI, st: SwitchStateInstance
 			pointerTextStatic: lastStatic,
 			armedAt: Date.now(),
 		});
-		if (ctx.mode !== "tui" && ctx.mode !== "rpc") {
-			// print/json: pointer compaction only — no in-memory arm, so the
-			// never-dispatched detection stays silent (nothing should dispatch)
-			return;
-		}
-		if (st.getState() === "in-flight") {
-			st.refreshInFlight(payload); // process-local refresh; record keeps its original armedAt
-			return;
-		}
 		st.arm(payload);
 		queueDispatch(pi, st, (m) => ctx.ui.notify(m));
 	});
@@ -139,15 +156,6 @@ export function registerCompactionHook(pi: ExtensionAPI, st: SwitchStateInstance
 	pi.on("session_compact_failed", async () => {
 		if (st.getState() === "armed") st.toIdle(); // disarm; nothing was switched
 	});
-}
-
-function minimalPointerText(oldSessionPath: string): string {
-	return [
-		`Previous session (complete, verbatim record): ${oldSessionPath}`,
-		"",
-		"Do not re-ask the user. When you need the exact error message, file path, number, or prior decision, search the record with `recall` instead of re-deriving — if a search reports unscanned files, continue it with the returned cursor.",
-		"If the `recall` tool is not available (extension disabled), read the session file directly with the read/bash tools.",
-	].join("\n");
 }
 
 /** Self-guarding deferred dispatch, shared by arming and recovery. */

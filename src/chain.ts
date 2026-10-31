@@ -28,6 +28,8 @@ export interface CursorState {
 	chainIndex: number;
 	byteOffset: number;
 	query: string;
+	/** the search that produced this cursor was a regex search */
+	regex?: boolean;
 }
 
 function insideDir(dir: string, path: string): boolean {

@@ -7,6 +7,7 @@ import {
 	parseSessionHeader,
 	renderEntry,
 	streamEntries,
+	streamEntryLines,
 	tailEntries,
 } from "./reader.js";
 import {
@@ -172,8 +173,27 @@ export function makeRecallTool(opts: { budget?: ChainBudget } = {}) {
 				for (const entry of entries) parts.push(renderEntry(entry));
 				let out = parts.join("\n\n");
 				if (Buffer.byteLength(out, "utf8") > RESULT_CAP_BYTES) {
-					const lastEntry = entries[entries.length - 1] as { id: string } | undefined;
-					out = `${Buffer.from(out, "utf8").subarray(0, RESULT_CAP_BYTES - 300).toString("utf8")}\n[truncated]\nnext: { "file": "${target}", "entryId": "${lastEntry?.id ?? ""}", "offset": ${RESULT_CAP_BYTES - 300} }`;
+					// the replay offset must be relative to the named entry's own
+					// render — recall_get replays a single entry from `offset`
+					const cut = RESULT_CAP_BYTES - 300;
+					let replay: { entryId: string; offset: number } | null = null;
+					// positions: parts[0] is the header, then one part per entry
+					let cursorPos = Buffer.byteLength(parts[0] + "\n\n", "utf8");
+					for (let i = 0; i < entries.length; i++) {
+						const len = Buffer.byteLength(parts[i + 1], "utf8");
+						if (cut < cursorPos + len) {
+							replay = { entryId: (entries[i] as { id: string }).id, offset: Math.max(0, cut - cursorPos) };
+							break;
+						}
+						cursorPos += len + 2; // the "\n\n" joiner
+					}
+					if (!replay) {
+						replay = {
+							entryId: (entries[entries.length - 1] as { id: string } | undefined)?.id ?? "",
+							offset: 0,
+						};
+					}
+					out = `${Buffer.from(out, "utf8").subarray(0, cut).toString("utf8")}\n[truncated]\nnext: { "file": "${target}", "entryId": "${replay.entryId}", "offset": ${replay.offset} }`;
 				}
 				return textResult(out);
 			}
@@ -191,7 +211,7 @@ export function makeRecallTool(opts: { budget?: ChainBudget } = {}) {
 					return err("recall: ancestor chain invalid — the cursor does not match the resolved chain");
 				}
 				query = cursor.query;
-				isRegex = false; // cursors store the literal-normalized query
+				isRegex = cursor.regex === true; // the cursor preserves its search's mode
 				roleFilter = params.role;
 				limit = params.limit ?? DEFAULT_LIMIT;
 				chainIndex = cursor.chainIndex;
@@ -230,20 +250,27 @@ export function makeRecallTool(opts: { budget?: ChainBudget } = {}) {
 			const unscanned: string[] = [];
 			let bytes = 0;
 			let cutAt: { file: string } | null = null;
+			let cutByteOffset = 0; // bytes scanned into the cut file: the resume skips them
+			const resumeByteOffset = hasCursor ? Math.max(0, parseCursor(params.cursor)?.byteOffset ?? 0) : 0;
 
 			for (const file of filesToScan) {
 				if (elapsedOver() || bytes > budget.maxBytes) {
 					cutAt = { file };
+					cutByteOffset = 0;
 					unscanned.push(file);
 					continue;
 				}
 				let fileBytes = 0;
+				// a cursor resuming this file skips its already-scanned prefix
+				const skipBytes = hasCursor && file === scanFiles[startAt] ? resumeByteOffset : 0;
+				if (skipBytes > 0) fileBytes = skipBytes;
 				try {
-					for await (const entry of streamEntries(file) as AsyncGenerator<SessionEntry>) {
-						fileBytes += 512; // amortized per-entry scan cost
-						bytes += 512;
+					for await (const { entry, lineBytes } of streamEntryLines(file, skipBytes)) {
+						fileBytes += lineBytes;
+						bytes += lineBytes;
 						if (bytes > budget.maxBytes || elapsedOver()) {
 							cutAt = { file };
+							cutByteOffset = fileBytes;
 							break;
 						}
 						if (isStateRecordEntry(entry)) continue;
@@ -255,6 +282,7 @@ export function makeRecallTool(opts: { budget?: ChainBudget } = {}) {
 						const at = matchEntry(text, query, isRegex, elapsedOver);
 						if (at === -2) {
 							cutAt = { file };
+							cutByteOffset = fileBytes;
 							break;
 						}
 						if (at >= 0) {
@@ -318,8 +346,9 @@ export function makeRecallTool(opts: { budget?: ChainBudget } = {}) {
 				const nextCursor = mintCursor({
 					visitedDigest: digest,
 					chainIndex: Math.max(0, ancestryFiles.indexOf(cutAt.file)),
-					byteOffset: 0,
+					byteOffset: cutByteOffset,
 					query,
+					regex: isRegex || undefined,
 				});
 				lines.push(
 					`not scanned this call: ${unscanned.join(", ") || "(none)"} — narrow the query, or continue with the cursor below`,

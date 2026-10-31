@@ -250,12 +250,15 @@ describe("compaction-disabled and in-flight contracts", () => {
 
 	it("refreshes an in-flight payload on a second confirming compaction, without a second dispatch", async () => {
 		const handlers: Record<string, ((...a: any[]) => any)[]> = {};
+		const appendCalls: unknown[] = [];
 		const pi = {
 			on: (name: string, h: (...a: any[]) => any) => {
 				(handlers[name] ??= []).push(h);
 			},
 			sendUserMessage: vi.fn(),
-			appendEntry: vi.fn(),
+			appendEntry: (...a: unknown[]) => {
+				appendCalls.push(a);
+			},
 		} as unknown as ExtensionAPI;
 		const st = createSwitchState();
 		registerCompactionHook(pi, st);
@@ -305,7 +308,9 @@ describe("compaction-disabled and in-flight contracts", () => {
 		);
 		expect(st.getState()).toBe("armed");
 
-		// in-flight: a second confirming compaction refreshes, never re-arms
+		// in-flight: a second confirming compaction refreshes, never re-arms —
+		// and appends no second armed record: the recovery window never slides
+		const armedRecordsBefore = appendCalls.length;
 		st.toInFlight();
 		const second = await before![0](
 			{
@@ -320,6 +325,7 @@ describe("compaction-disabled and in-flight contracts", () => {
 		);
 		expect(st.getState()).toBe("in-flight"); // still the same switch
 		expect(st.getPayload()?.pointerTextStatic).toContain(second!.compaction!.summary.split("\n")[0]);
+		expect(appendCalls).toHaveLength(armedRecordsBefore); // process-local refresh only (M1)
 		expect((pi as any).sendUserMessage).not.toHaveBeenCalled(); // dispatch goes through the queue, not directly
 
 		// session_compact_failed disarms an armed (not in-flight) switch

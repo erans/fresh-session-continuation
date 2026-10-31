@@ -223,3 +223,82 @@ describe("recall_get", () => {
 		expect(out).toContain("fix the login bug");
 	});
 });
+
+describe("review-fix regressions", () => {
+	it("H1: a mid-file byte cut resumes at the byte offset and makes forward progress", async () => {
+		// one file whose scan alone exceeds the injected budget: entries ~1 KB each
+		const b = buildSession(root, "midcut.jsonl");
+		b.user("m0", `prefix padding ${"x".repeat(900)}`);
+		b.user("m1", `needle-one ${"y".repeat(900)}`);
+		b.user("m2", `needle-two ${"z".repeat(900)}`);
+		b.user("m3", `needle-three ${"w".repeat(900)}`);
+		const file = b.write();
+
+		const first = text(
+			await runRecall(file, { query: "needle" }, { budget: { maxBytes: 3_000, maxElapsedMs: 10_000, maxDepth: 8 } }),
+		);
+		expect(first).toContain("not scanned this call"); // cut mid-file
+		expect(first).toContain("needle-one"); // reached before the cut
+		const cursor = first.match(/nextCursor: (\S+)/)![1];
+		const decoded = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+		expect(decoded.byteOffset).toBeGreaterThan(0); // the minted offset is real
+
+		const resumed = text(
+			await runRecall(file, { cursor }, { budget: { maxBytes: 3_000, maxElapsedMs: 10_000, maxDepth: 8 } }),
+		);
+		expect(resumed).toContain("needle-two"); // forward past the cut
+		expect(resumed).not.toContain("needle-one"); // the scanned prefix is skipped, not rescanned
+	}, 30_000);
+
+	it("M3: a budget-cut regex search resumes as a regex search", async () => {
+		// chain: top -> deepest; the regex pattern hits in both, but the first
+		// call's byte budget cuts before the deepest file is scanned
+		const deepest = buildSession(root, "regex-deep.jsonl")
+			.user("r0", "padding line for the cut")
+			.user("r1", "REGHIT-77 embedded")
+			.write();
+		const top = buildSession(root, "regex-top.jsonl", { parentSession: deepest })
+			.user("q0", "top of the chain REGHIT-99")
+			.write();
+
+		const first = text(
+			await runRecall(top, { query: "REGHIT-\\d+", regex: true }, { budget: { maxBytes: 200, maxElapsedMs: 10_000, maxDepth: 8 } }),
+		);
+		expect(first).toContain("nextCursor:");
+		const cursor = first.match(/nextCursor: (\S+)/)![1];
+		const resumed = text(await runRecall(top, { cursor }));
+		// a literal resume for the pattern text would find nothing; the regex
+		// resume must find both hits
+		expect(resumed).toContain("REGHIT-77");
+		expect(resumed).toContain("REGHIT-99");
+	}, 30_000);
+
+	it("M4: byte budgets count real line sizes, not per-entry amortization", async () => {
+		// 3 entries of ~200 KB real bytes: 512/entry would count 1.5 KB and never cut
+		const b = buildSession(root, "huge-entries.jsonl");
+		for (let i = 0; i < 3; i++) b.user(`h${i}`, `huge padding ${"v".repeat(200_000)}`);
+		const file = b.write();
+		const out = text(
+			await runRecall(file, { query: "huge padding" }, { budget: { maxBytes: 250_000, maxElapsedMs: 10_000, maxDepth: 8 } }),
+		);
+		expect(out).toContain("nextCursor:"); // the real bytes cut the scan
+	}, 30_000);
+
+	it("L3: a truncated multi-entry tail names the entry at the cut with a replayable offset", async () => {
+		const b = buildSession(root, "longtail.jsonl");
+		for (let i = 0; i < 12; i++) b.user(`t${i}`, `tail line ${i} ${"t".repeat(4_000)}`);
+		const file = b.write();
+		const out = text(await runRecall(file, { tail: 12 }));
+		expect(out).toContain("[truncated]");
+		const next = JSON.parse(out.match(/next: (\{[^}]+\})/)![1]);
+		expect(next.entryId).toBeTruthy();
+		expect(next.offset).toBeGreaterThan(0);
+
+		// recall_get replays from that exact point — non-empty continuation
+		const get = makeRecallGetTool();
+		const resumed = text(
+			await get.execute("g", { file, entryId: next.entryId, offset: next.offset }, undefined, undefined, ctxFor(file)),
+		);
+		expect(Buffer.byteLength(resumed, "utf8")).toBeGreaterThan(1_000);
+	}, 30_000);
+});
