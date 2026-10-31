@@ -84,8 +84,8 @@ export async function captureBranchSnapshot(
 			if (message.role === "assistant" && !lastAssistant) lastAssistant = branch[i];
 			if (lastUser && lastAssistant) break;
 		}
-		const tail = branch[branch.length - 1];
-		const tailIsUser = messageOf(tail)?.role === "user";
+		const tail = branch[branch.length - 1] ?? null;
+		const tailIsUser = tail !== null && messageOf(tail)?.role === "user";
 		return { branch, lastUser, lastAssistant, tailIsUser };
 	};
 

@@ -16,6 +16,7 @@ import type {
 	SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import { createFakeProvider, FAKE_MODEL, type FakeCall, type TurnScript } from "./model.js";
+import type { Model } from "@earendil-works/pi-ai";
 
 export interface TestSession {
 	session: AgentSession;
@@ -40,6 +41,10 @@ export interface CreateTestSessionOptions {
 	keepRecentTokens?: number;
 	/** Open an existing session file instead of creating a new one. */
 	openSessionFile?: string;
+	/** compaction.enabled; false stages the disabled-compaction paths. */
+	compactionEnabled?: boolean;
+	/** Fake model context window (default 2000). Raise it to keep manual tests off the auto-compaction cliff. */
+	contextWindow?: number;
 }
 
 function makeCaptureUI(notices: string[]): ExtensionUIContext {
@@ -73,10 +78,14 @@ export async function createTestSession(opts: CreateTestSessionOptions): Promise
 
 	const calls: FakeCall[] = [];
 	const notices: string[] = [];
-	const factories = [createFakeProvider(opts.turns ?? [], calls), ...(opts.extensions ?? [])];
+	const fakeModel: Model<"fake-stream"> = {
+		...FAKE_MODEL,
+		contextWindow: opts.contextWindow ?? FAKE_MODEL.contextWindow,
+	};
+	const factories = [createFakeProvider(opts.turns ?? [], calls, fakeModel), ...(opts.extensions ?? [])];
 	const settingsManager = SettingsManager.inMemory({
 		compaction: {
-			enabled: true,
+			enabled: opts.compactionEnabled ?? true,
 			reserveTokens: opts.reserveTokens ?? 100,
 			keepRecentTokens: opts.keepRecentTokens ?? 10,
 		},
@@ -94,7 +103,7 @@ export async function createTestSession(opts: CreateTestSessionOptions): Promise
 			services,
 			sessionManager,
 			sessionStartEvent,
-			model: FAKE_MODEL,
+			model: fakeModel,
 		});
 		return { ...result, services, diagnostics: services.diagnostics };
 	};

@@ -23,6 +23,8 @@ export interface TurnScript {
 export interface FakeCall {
 	turn: number;
 	roles: string[];
+	/** Text of the first user message in the call's context (pointer-prompt detection). */
+	firstUser?: string;
 }
 
 export const FAKE_MODEL: Model<"fake-stream"> = {
@@ -60,7 +62,11 @@ function makeMessage(model: Model<Api>, content: (TextContent | ToolCall)[], sto
  * Extension factory registering the fake provider. Pops one TurnScript per
  * model call (repeating the last when exhausted) and records every call.
  */
-export function createFakeProvider(turns: TurnScript[], log: FakeCall[]): (pi: ExtensionAPI) => void {
+export function createFakeProvider(
+	turns: TurnScript[],
+	log: FakeCall[],
+	model: Model<"fake-stream"> = FAKE_MODEL,
+): (pi: ExtensionAPI) => void {
 	let i = 0;
 	return (pi: ExtensionAPI) => {
 		pi.registerProvider("fake", {
@@ -70,18 +76,29 @@ export function createFakeProvider(turns: TurnScript[], log: FakeCall[]): (pi: E
 			api: "fake-stream",
 			models: [
 				{
-					id: FAKE_MODEL.id,
-					name: FAKE_MODEL.name,
+					id: model.id,
+					name: model.name,
 					reasoning: false,
 					input: ["text"],
 					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-					contextWindow: FAKE_MODEL.contextWindow,
-					maxTokens: FAKE_MODEL.maxTokens,
+					contextWindow: model.contextWindow,
+					maxTokens: model.maxTokens,
 				},
 			],
 			streamSimple: (model: Model<Api>, context: TranscriptContext): AssistantMessageEventStream => {
 				const script = turns[Math.min(i, turns.length - 1)] ?? { text: "done" };
-				log.push({ turn: i, roles: context.messages.map((m) => m.role) });
+				const firstUser = context.messages.find((m) => m.role === "user");
+				log.push({
+					turn: i,
+					roles: context.messages.map((m) => m.role),
+					firstUser:
+						typeof firstUser?.content === "string"
+							? firstUser.content
+							: (firstUser?.content ?? [])
+									.filter((b) => b.type === "text" && typeof b.text === "string")
+									.map((b) => (b as { text: string }).text)
+									.join("\n"),
+				});
 				i++;
 
 				const content: (TextContent | ToolCall)[] = [];

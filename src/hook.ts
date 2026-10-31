@@ -132,8 +132,7 @@ export function registerCompactionHook(pi: ExtensionAPI, st: SwitchStateInstance
 		queueDispatch(pi, st, (m) => ctx.ui.notify(m));
 	});
 
-	pi.on("session_compact_failed", async (event, ctx) => {
-		console.log("DBG session_compact_failed:", JSON.stringify(event).slice(0, 300));
+	pi.on("session_compact_failed", async () => {
 		if (st.getState() === "armed") st.toIdle(); // disarm; nothing was switched
 	});
 }
