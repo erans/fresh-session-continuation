@@ -154,6 +154,14 @@ No build artifact: pi loads extensions from TypeScript (`pi.extensions` in `pack
 
 Design and decisions live in [`docs/superpowers/specs/`](docs/superpowers/specs/) and [`docs/superpowers/plans/`](docs/superpowers/plans/).
 
+## Credit
+
+This implements an idea that isn't mine. **Alexander Yue** ([@Alezander9](https://x.com/Alezander9)) made the case for context retrieval instead of compaction — and built it into [Mainplane](https://github.com/mainplane-ai/mainplane):
+
+**[Context retrieval instead of compaction: a Mainplane example](https://x.com/Alezander9/status/2115842962521509968)** — October 29, 2026
+
+This extension is an independent take on that idea for [pi](https://pi.dev): same bet, that a verbatim record you can search beats a summary you have to trust, with the handoff made automatic so it feels like compaction never happened.
+
 ## License
 
 MIT © Eran Sandler
