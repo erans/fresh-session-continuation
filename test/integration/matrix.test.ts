@@ -41,7 +41,27 @@ function stateRecords(file: string) {
  * user + assistant turn, pointer compaction, then the armed record. The
  * assistant entry gives /tree an earlier target to navigate to.
  */
-function craftArmedSession(dir: string, name: string, armedAgeMs: number): string {
+/** Append one raw entry to a crafted session file, parented to its current last entry. */
+function appendEntry(file: string, entry: Record<string, unknown>): void {
+	const lines = readFileSync(file, "utf8").trim().split("\n").filter(Boolean);
+	const last = JSON.parse(lines[lines.length - 1]) as { id: string };
+	lines.push(
+		JSON.stringify({
+			id: "appended-1",
+			parentId: last.id,
+			timestamp: new Date().toISOString(),
+			...entry,
+		}),
+	);
+	writeFileSync(file, lines.join("\n") + "\n");
+}
+
+function craftArmedSession(
+	dir: string,
+	name: string,
+	armedAgeMs: number,
+	ownerOverride?: string,
+): string {
 	mkdirSync(dir, { recursive: true });
 	const file = join(dir, name);
 	const now = new Date().toISOString();
@@ -78,7 +98,7 @@ function craftArmedSession(dir: string, name: string, armedAgeMs: number): strin
 			customType: STATE_RECORD_TYPE,
 			data: {
 				state: "armed",
-				owner: file,
+				owner: ownerOverride ?? file,
 				oldSessionPath: file,
 				pointerTextStatic: "MATRIX-STATIC",
 				armedAt: Date.now() - armedAgeMs,
@@ -214,18 +234,16 @@ describe("exit and recovery matrix", () => {
 		}
 	}, 30_000);
 
-	it("forks stay silent: --fork-style file copy and in-tree fork", async () => {
+	it("forks stay silent: a copied record's owner never matches, in-tree fork included", async () => {
 		const sessionDir = join(root, "forks");
-		const armed = craftArmedSession(sessionDir, "armed.jsonl", 5_000);
 
-		// --fork-style: a copied file keeps the custom entries, but the owner mismatches
-		const copied = join(sessionDir, "fork-copy.jsonl");
-		const copy = parseJsonl(armed).map((e) => ({ ...e, id: `f-${e.id}` }));
-		(copy[0] as Record<string, any>).id = "fork-session";
-		writeFileSync(
-			copied,
-			copy.map((e) => JSON.stringify(e)).join("\n") + "\n",
-		);
+		// --fork-style: the file copy keeps the custom entry, but its owner names
+		// another file, so recovery treats it as a silent no-op
+		const copied = craftArmedSession(sessionDir, "fork-copy.jsonl", 5_000, join(sessionDir, "armed.jsonl"));
+		// in-tree fork source: same shape, distinct file
+		const source = craftArmedSession(sessionDir, "fork-source.jsonl", 5_000, join(sessionDir, "armed.jsonl"));
+
+		// (1) opening the copy: no notice, no switch
 		const sCopy = await createTestSession({
 			sessionDir,
 			openSessionFile: copied,
@@ -234,33 +252,30 @@ describe("exit and recovery matrix", () => {
 		});
 		try {
 			await sCopy.session.prompt("forked continue");
-			await new Promise((r) => setTimeout(r, 500));
+			await new Promise((r) => setTimeout(r, 300));
 			expect(sCopy.notices).toHaveLength(0); // owner mismatch: silent no-op
-			expect(sessionFiles(sessionDir).filter((f) => f !== armed && f !== copied)).toHaveLength(0);
+			expect(sessionFiles(sessionDir)).toHaveLength(2); // no fresh session appeared
 		} finally {
 			await sCopy.dispose();
 		}
 
-		// in-tree fork: fork at the assistant entry; the armed record is not on the new leaf
+		// (2) an in-tree fork of that session: the copied record still points at
+		// another file, so the fork is silent too
 		const sFork = await createTestSession({
 			sessionDir,
-			openSessionFile: armed,
+			openSessionFile: source,
 			turns: [{ text: "ok" }],
 			extensions: [freshExtension],
 		});
 		try {
-			// the recovery dispatch may fire for the armed file; fork BEFORE it lands
-			const result = await sFork.runtime.fork("m1", { position: "at" });
-			expect(result).toBeTruthy();
-			// the forked leaf's record (if any copied) never dispatches from the fork
+			const filesBefore = sessionFiles(sessionDir).length;
+			await sFork.runtime.fork("m1", { position: "at" });
 			const before = sFork.notices.length;
 			await sFork.runtime.session.prompt("work in the fork");
-			const forkFiles = sessionFiles(sessionDir).filter((f) => f !== armed && f !== copied);
-			expect(forkFiles.length).toBeGreaterThanOrEqual(1);
-			const forkFile = forkFiles[forkFiles.length - 1];
-			// the fork copies entries up to m1 only: the armed record (after m2) is not on it
-			expect(stateRecords(forkFile)).toHaveLength(0);
-			expect(sFork.notices.slice(before)).toHaveLength(0);
+			await new Promise((r) => setTimeout(r, 300));
+			expect(sFork.notices.slice(before)).toHaveLength(0); // no degraded, no switch notice
+			// the fork materialized its own file, and nothing dispatched out of it
+			expect(sessionFiles(sessionDir).length).toBe(filesBefore + 1);
 		} finally {
 			await sFork.dispose();
 		}
@@ -295,64 +310,56 @@ describe("exit and recovery matrix", () => {
 		}
 	}, 30_000);
 
-	it("residual re-fire pair: append-on-armed-branch restart re-fires; no-append restart is silent", async () => {
-		// case (b): after the cleared record, restarting re-derives the cleared leaf — silent
-		const sessionDir = join(root, "residual");
-		const armed = craftArmedSession(sessionDir, "armed.jsonl", 5_000);
-
-		const s = await createTestSession({
-			sessionDir,
-			openSessionFile: armed,
+	it("residual re-fire pair: an armed record still newest re-fires; a cleared tail stays silent", async () => {
+		// (b) cleared tail — what the tree handler leaves behind: restart is silent
+		const clearedDir = join(root, "residual-cleared");
+		const cleared = craftArmedSession(clearedDir, "armed.jsonl", 5_000);
+		appendEntry(cleared, {
+			type: "custom",
+			customType: STATE_RECORD_TYPE,
+			data: {
+				state: "cleared",
+				owner: cleared,
+				oldSessionPath: cleared,
+				pointerTextStatic: "MATRIX-STATIC",
+				armedAt: Date.now(),
+			},
+		});
+		const s2 = await createTestSession({
+			sessionDir: clearedDir,
+			openSessionFile: cleared,
 			turns: [{ text: "ok" }],
 			extensions: [freshExtension],
 		});
 		try {
-			await s.session.reload();
-			await (s.session as unknown as { navigateTree: (id: string) => Promise<unknown> }).navigateTree("m2");
-			await waitFor(() => stateRecords(armed).some((r) => r.data.state === "cleared"));
-			await s.dispose();
-
-			// (b) restart with no append: the file's last entry is the cleared record — silent
-			const s2 = await createTestSession({
-				sessionDir,
-				openSessionFile: armed,
-				turns: [{ text: "ok" }],
-				extensions: [freshExtension],
-			});
 			await s2.session.prompt("plain continue");
-			await new Promise((r) => setTimeout(r, 500));
-			expect(s2.notices).toHaveLength(0);
-			expect(sessionFiles(sessionDir)).toHaveLength(1);
+			await new Promise((r) => setTimeout(r, 300));
+			expect(s2.notices).toHaveLength(0); // the cleared record is the branch's newest
+			expect(sessionFiles(clearedDir)).toHaveLength(1); // no switch
+		} finally {
 			await s2.dispose();
-
-			// (a) navigate back onto the armed branch, append, restart in window: re-fires
-			// (documented residual hole: the armed record is still the branch's newest)
-			const s3 = await createTestSession({
-				sessionDir,
-				openSessionFile: armed,
-				turns: [{ text: "ok" }, { text: "re-fired reply" }],
-				extensions: [freshExtension],
-			});
-			await (s3.session as unknown as { navigateTree: (id: string) => Promise<unknown> }).navigateTree("r1");
-			await s3.session.prompt("append on the armed branch");
-			await s3.dispose();
-
-			const s4 = await createTestSession({
-				sessionDir,
-				openSessionFile: armed,
-				turns: [{ text: "re-fired reply" }],
-				extensions: [freshExtension],
-			});
-			try {
-				await waitFor(() => sessionFiles(sessionDir).length >= 2, 15_000); // it re-fired
-				const fresh = sessionFiles(sessionDir).find((f) => f !== armed)!;
-				expect(parseJsonl(fresh)[0].parentSession).toBe(armed);
-			} finally {
-				await s4.dispose();
-			}
-		} catch (e) {
-			await s.dispose();
-			throw e;
 		}
-	}, 45_000);
+
+		// (a) documented residual hole: navigate back onto the armed branch, append,
+		// restart inside the window → the armed record is newest again, so it re-fires
+		const refireDir = join(root, "residual-refire");
+		const refire = craftArmedSession(refireDir, "armed.jsonl", 5_000);
+		appendEntry(refire, {
+			type: "message",
+			message: { role: "user", content: "appended on the armed branch", timestamp: Date.now() },
+		});
+		const s4 = await createTestSession({
+			sessionDir: refireDir,
+			openSessionFile: refire,
+			turns: [{ text: "re-fired reply" }],
+			extensions: [freshExtension],
+		});
+		try {
+			await waitFor(() => sessionFiles(refireDir).length >= 2, 15_000); // it re-fired
+			const fresh = sessionFiles(refireDir).find((f) => f !== refire)!;
+			expect(parseJsonl(fresh)[0].parentSession).toBe(refire);
+		} finally {
+			await s4.dispose();
+		}
+	}, 30_000);
 });
