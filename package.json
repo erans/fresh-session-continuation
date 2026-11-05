@@ -1,6 +1,6 @@
 {
   "name": "fresh-session-continuation",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Pi extension: replaces lossy LLM-summary compaction with a zero-cost pointer compaction plus an automatic fresh-session handoff that recalls the verbatim session record.",
   "keywords": [
     "pi-package",
