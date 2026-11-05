@@ -154,32 +154,6 @@ No build artifact: pi loads extensions from TypeScript (`pi.extensions` in `pack
 
 Design and decisions live in [`docs/superpowers/specs/`](docs/superpowers/specs/) and [`docs/superpowers/plans/`](docs/superpowers/plans/).
 
-## Releasing
-
-Versions are cut by tag, and publishing happens in CI with **npm Trusted Publishing** — no long-lived npm token anywhere.
-
-```sh
-npm version patch        # or minor / major — writes package.json + commit + tag
-git push --follow-tags   # tag push starts the release
-```
-
-The tag must equal `package.json` (`v0.1.1` ↔ `0.1.1`); the workflow fails fast otherwise. On a tag the workflow:
-
-1. installs, typechecks and tests (`npm run check`),
-2. publishes to npm with `--provenance` — npm trades the GitHub OIDC token for short-lived credentials,
-3. creates the GitHub Release with generated notes.
-
-One-time bootstrap, because a trusted publisher is configured *on an existing package*:
-
-```sh
-npm login
-npm publish --access public                         # first release only
-npm trust github fresh-session-continuation \
-  --file .github/workflows/release.yml \
-  --repo erans/fresh-session-continuation \
-  --allow-publish                                   # everything after this is tokenless
-```
-
 ## License
 
 MIT © Eran Sandler
