@@ -134,6 +134,7 @@ describe("exit and recovery matrix", () => {
 		const sOther = await createTestSession({
 			sessionDir: otherDir,
 			openSessionFile: other,
+			contextWindow: 100_000,
 			turns: [{ text: "ok" }],
 			extensions: [freshExtension],
 		});
@@ -150,6 +151,7 @@ describe("exit and recovery matrix", () => {
 			sessionDir,
 			openSessionFile: armed,
 			turns: [{ text: "recovered" }],
+			contextWindow: 100_000,
 			extensions: [freshExtension],
 		});
 		try {
@@ -174,6 +176,7 @@ describe("exit and recovery matrix", () => {
 			openSessionFile: armed,
 			turns: [{ text: "ok" }],
 			extensions: [freshExtension],
+			contextWindow: 100_000,
 		});
 		try {
 			await s1.session.prompt("continue");
@@ -191,6 +194,7 @@ describe("exit and recovery matrix", () => {
 			openSessionFile: armed,
 			turns: [{ text: "ok" }],
 			extensions: [freshExtension],
+			contextWindow: 100_000,
 		});
 		try {
 			await s2.session.prompt("continue again");
@@ -247,6 +251,7 @@ describe("exit and recovery matrix", () => {
 		const sCopy = await createTestSession({
 			sessionDir,
 			openSessionFile: copied,
+			contextWindow: 100_000,
 			turns: [{ text: "ok" }],
 			extensions: [freshExtension],
 		});
@@ -264,6 +269,7 @@ describe("exit and recovery matrix", () => {
 		const sFork = await createTestSession({
 			sessionDir,
 			openSessionFile: source,
+			contextWindow: 100_000,
 			turns: [{ text: "ok" }],
 			extensions: [freshExtension],
 		});
@@ -328,6 +334,7 @@ describe("exit and recovery matrix", () => {
 		const s2 = await createTestSession({
 			sessionDir: clearedDir,
 			openSessionFile: cleared,
+			contextWindow: 100_000,
 			turns: [{ text: "ok" }],
 			extensions: [freshExtension],
 		});
@@ -351,6 +358,7 @@ describe("exit and recovery matrix", () => {
 		const s4 = await createTestSession({
 			sessionDir: refireDir,
 			openSessionFile: refire,
+			contextWindow: 100_000,
 			turns: [{ text: "re-fired reply" }],
 			extensions: [freshExtension],
 		});
