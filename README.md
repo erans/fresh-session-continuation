@@ -1,107 +1,185 @@
 # fresh-session continuation
 
-A pi coding-agent extension that replaces LLM-summary compaction with **retrieval**.
-When the context fills, pi's compaction machinery is intercepted: instead of paying
-for a lossy summary, a zero-cost **pointer compaction** is written (the context
-becomes `[system][pointer]`), and the agent automatically continues in a **fresh
-session** whose first message is a mechanical pointer prompt. Nothing is
-summarized — the previous session's complete JSONL record stays on disk, and the
-`recall` / `recall_get` tools fetch exact lines from it on demand.
+**Your agent's context filled up. Nothing had to be summarized, re-read, or re-explained.**
 
-- Fully automatic at pi's existing triggers: threshold (mid-run or run boundary),
-  pre-prompt, and context overflow. Works exactly where compaction works today.
-- Never leaves the running pi instance — the switch is an in-process
-  `newSession({ parentSession })`.
-- **Lossless**: every generation's raw record is kept verbatim; the pointer names
-  its source file and the toolchain reads it back byte-for-byte.
-- A failed switch degrades to same-session pointer+recall continuation — never a
-  dead run.
+A [pi](https://pi.dev) extension that replaces LLM-summary compaction with a **zero-cost pointer** plus a **fresh session** that can still recall every line of the old one, verbatim.
+
+```sh
+pi install npm:fresh-session-continuation
+```
+
+---
+
+## The problem with compaction
+
+Every long agent session ends the same way. The context window fills, so the harness calls a model to summarize everything so far, throws the original away, and continues from a lossy paraphrase. Then it happens again. And again, each generation summarizing a summary.
+
+You pay for every one of those passes — a full request over your entire context, the single most expensive call a session ever makes — and in exchange you get **degradation**: the exact error message becomes "an error occurred", the file path becomes "a config file", the number you agreed on forty turns ago quietly becomes a different number. The agent re-reads files it already read, re-runs commands it already ran, and asks you things you already answered.
+
+The record was never the problem. Nobody kept it.
+
+## What this does
+
+When pi decides the context is full, this extension intercepts the compaction and pays **zero tokens** for it:
+
+1. **A pointer compaction lands** — no model call. The context becomes `[system prompt][pointer]`, where the pointer names the old session file, indexes its user messages, lists the files touched, and restates the task and last progress.
+2. **A fresh session starts automatically** — in the same process, same terminal, linked to the old one as its parent. The pointer is its first message. No copy-paste, no `/clear`, no re-prompting.
+3. **The full record stays on disk** — the previous session's JSONL is never truncated, summarized, or deleted. Two tools (`recall`, `recall_get`) search it and fetch exact lines on demand, across the whole ancestor chain.
+
+Same trigger points as before — threshold, pre-prompt, context overflow — so it behaves exactly like compaction, minus the loss and minus the bill.
+
+## Why it's different
+
+| | Default compaction | fresh-session continuation |
+|---|---|---|
+| Cost of compacting | A full model pass over the whole context | **$0** — pointer rendering is text formatting |
+| What survives | A paraphrase, then a paraphrase of a paraphrase | **Every byte**, on disk, searchable |
+| After 10 compactions | The 10th summary of a summary | The original record, all 10 generations |
+| Exact strings (errors, paths, numbers) | Lost, or hallucinated back | Fetched verbatim |
+| Failure mode | Silent drift | Loud notice + safe pointer fallback |
+| Context after a switch | Summary + retained tail | System prompt + pointer (~4k tokens) |
+
+## How it works
+
+```
+context hits the threshold
+        │
+        ├─ session_before_compact ──► pointer text (no LLM call)
+        │                              firstKeptEntryId: null  →  retain none
+        ├─ session_compact ─────────► armed record persisted (crash safety)
+        │
+        └─ /fresh ──────────────────► drain queued input
+                                       pre-flight: file readable? dir writable? model set?
+                                       newSession({ parentSession: old })
+                                       └─► pointer becomes the first message
+                                             └─► agent continues, recall() at will
+```
+
+The switch is **guarded at every step**: the pointer compaction always lands *before* anything risky, so a failed switch degrades to continuing in the same session with pointer + recall. There is no path where a full context leaves you with a dead run.
 
 ## Install
 
-Pi loads direct TypeScript files (or subdirectories with an `index.ts`) from your
-extensions directory. From this repo:
+### From npm (recommended)
 
 ```sh
-git clone <this repo> ~/fresh-session-continuation
-ln -s ~/fresh-session-continuation/src ~/.pi/agent/extensions/fresh-session-continuation
+pi install npm:fresh-session-continuation
 ```
 
-(The symlink makes `src/index.ts` the subdirectory entry point; the repo's
-`node_modules` provides `@earendil-works/pi-coding-agent` and `pi-tui`.)
+### From git, pinned to a release tag
 
-Requires: pi 1.4.0+ (`@earendil-works/pi-coding-agent`), compaction enabled (the
-default).
+```sh
+pi install git:github.com/erans/fresh-session-continuation@v0.1.0
+```
 
-## What happens at the threshold
+### From a local checkout
 
-1. `session_before_compact` renders the pointer (old session path, index of user
-   messages, files read/modified, the last user message, a progress anchor) and
-   returns it as the compaction summary with `firstKeptEntryId: null`
-   (retain-none). Zero LLM calls.
-2. On the confirming `session_compact`, an `armed` state record is appended to the
-   session (crash-safety) and `/fresh` is dispatched.
-3. `/fresh` drains queued input, runs pre-flight checks, re-checks for
-   cancellation, clears the record, and switches: the new session's first message
-   is the pointer prompt, auto-submitted.
-4. The agent continues; `recall` and `recall_get` retrieve from the old record.
+```sh
+git clone https://github.com/erans/fresh-session-continuation
+pi install ./fresh-session-continuation
+```
 
-Manual use: `/fresh` at any time; `/compact` writes a pointer compaction
-(keeping pi's retain-tail cut) without switching; `/compact <instructions>`
-falls through to pi's default LLM summary.
+Requires pi 1.4.0+ with compaction enabled (the default). The extension warns once if you've turned compaction off — with it off, pi never reaches the hook.
 
-## Tools
+## Usage
 
-- `recall { query | tail | cursor }` — literal substring search (opt-in `regex`,
-  capped), tail review, or budget-cut continuation across the whole validated
-  ancestor chain. Results cap at ~32 KB with a resumable cursor.
-- `recall_get { file, entryId, offset? }` — fetch one entry (or a window
-  `around`) verbatim, with byte-offset paging.
+Mostly, you don't. It fires on its own:
 
-## Cost and latency
-
-Mechanism-only numbers from the repo harness (fake provider, 3.6 MB /
-~890k-token reference fixture — `npx tsx scripts/measure.ts`):
-
-| measurement | value |
+| Trigger | What happens |
 |---|---|
-| switch latency, trigger → fresh first turn (no queue) | 124 ms |
-| switch cost (pointer compaction is pure rendering) | $0.00 |
-| pointer compaction size (this fixture) | 1.1 KB (~282 tokens) |
+| Context threshold (mid-run or at a run boundary) | Pointer compaction + automatic switch |
+| Pre-prompt threshold | Pointer compaction + automatic switch |
+| Context overflow (provider rejects) | Pointer compaction + automatic switch |
 
-Real-model rows — fill from a run with your model and price table:
+And when you want control:
 
-| measurement | value |
+| Command | Behavior |
 |---|---|
-| fresh first turn + recall calls, 128k model at $_/M in, $_/M out | _fill_ |
-| one default LLM compaction of the same record (comparison) | _fill_ |
-| drain case (queued input remainder): N turns, T s, $X | _fill_ |
+| `/fresh` | Switch to a fresh session right now |
+| `/compact` | Pointer compaction only — keeps pi's retained tail, **never** switches |
+| `/compact <instructions>` | Your instructions, pi's normal LLM summary (opt-out) |
 
-## Limits and compatibility
+## The tools
 
-- **`--no-session`** (unpersisted): recall is unavailable; the hook notifies once
-  and pi's default compaction runs.
-- **print / json modes**: pointer compaction only — no auto-switch (the armed
-  record persists; an interactive resume inside the ~1-minute window dispatches
-  it once). No spurious notices.
-- **Extension disabled**: the pointer text is self-sufficient — it names the old
-  session file and instructs reading it with the ordinary read/bash tools; the
-  raw record is also reachable via `/tree` and the session picker.
-- **Disk growth**: the extension never deletes session files — the record is the
-  product. Each continuation adds one session file; the switch notice and each
-  pointer name their file, so chain members are identifiable. Prune manually via
-  the session picker (`Ctrl+D` → trash). Automatic pruning of pointer-only
-  intermediate sessions is deliberately deferred: a wrong prune destroys the
-  record this design exists to keep.
+Both are read-only and scoped to the current session plus its validated ancestors — never an arbitrary path.
+
+**`recall`** — search the record, review recent steps, or continue a cut search:
+
+```jsonc
+{ "query": "ECONNREFUSED" }          // literal substring, escaped by default
+{ "query": "timeout|refused", "regex": true }
+{ "tail": 20 }                        // last 20 entries, before the newest compaction
+{ "cursor": "eyJ2aXNpdGVk…" }         // continue exactly where the last walk stopped
+```
+
+**`recall_get`** — fetch one entry (or a window around it) verbatim, with offset paging for entries larger than the result cap:
+
+```jsonc
+{ "file": "/sessions/old.jsonl", "entryId": "a1b2c3d4" }
+{ "around": { "file": "/sessions/old.jsonl", "entryId": "a1b2c3d4", "before": 3, "after": 3 } }
+```
+
+Results cap at ~32 KB with a resumable cursor, so the model can page instead of blowing up its own context. Enumeration is budgeted (bytes, elapsed time, chain depth), and a budget cut always returns a cursor — never a silent miss.
+
+## Numbers
+
+Measured in this repo's harness against a generated 3.6 MB / ~890k-token session of realistic tool traffic (`npx tsx scripts/measure.ts`):
+
+| Measurement | Value |
+|---|---|
+| Switch latency, threshold → fresh session's first turn | **124 ms** |
+| Cost of the switch itself | **$0.00** |
+| Pointer compaction size | **1.1 KB** (~282 tokens) |
+
+The model here is a scripted fake, so those are machinery numbers: the pointer rendering, the queue drain, the pre-flight, the session replacement, the first-turn dispatch. They are the part this extension controls. The first turn's own cost is whatever your model charges for ~4k tokens of pointer plus the `recall` calls it decides to make — deliberately re-measured rather than assumed before any dollar figure is published here. (One compaction of that same session, by contrast, is a full model pass over ~890k tokens.)
+
+## Limits, stated plainly
+
+- **`--no-session`**: no file on disk means nothing to recall. You get one notice and pi's default compaction.
+- **print / json modes**: pointer compaction only, no auto-switch (nothing to hand off to). An armed record persists, so resuming interactively within ~1 minute picks it up.
+- **Images** are not returned by `recall` (text only). The switch re-attaches the last user message's images, capped at 4.
+- **Disk growth is intentional**: the record *is* the product. Each continuation adds one session file. Nothing is ever deleted automatically; prune by hand from the session picker if you want to.
+- **Extension disabled**: the pointer text is self-sufficient. It names the old session file and tells the model to read it with plain `read`/`bash`, so a session survives losing the extension.
+- **Not a memory system.** It recalls *this* conversation's ancestry. Nothing is shared between unrelated sessions.
 
 ## Development
 
 ```sh
-npx tsc --noEmit   # types
-npx vitest run      # 92 tests: unit + integration (harness with a scripted fake provider)
-npx tsx scripts/fixture-session.ts   # generate the reference fixture
+npm ci
+npm run check     # typecheck + 92 tests (unit + integration on a scripted-provider harness)
+npx tsx scripts/fixture-session.ts   # generate the 400k-token reference fixture
 npx tsx scripts/measure.ts           # print the measurement table
 ```
 
-Design spec: `docs/superpowers/specs/2026-10-30-fresh-session-continuation-design.md`.
-Implementation plan: `docs/superpowers/plans/2026-10-30-fresh-session-continuation.md`.
+No build artifact: pi loads extensions from TypeScript (`pi.extensions` in `package.json`), so `npm run build` is a typecheck gate on exactly what ships.
+
+Design and decisions live in [`docs/superpowers/specs/`](docs/superpowers/specs/) and [`docs/superpowers/plans/`](docs/superpowers/plans/).
+
+## Releasing
+
+Versions are cut by tag, and publishing happens in CI with **npm Trusted Publishing** — no long-lived npm token anywhere.
+
+```sh
+npm version patch        # or minor / major — writes package.json + commit + tag
+git push --follow-tags   # tag push starts the release
+```
+
+The tag must equal `package.json` (`v0.1.1` ↔ `0.1.1`); the workflow fails fast otherwise. On a tag the workflow:
+
+1. installs, typechecks and tests (`npm run check`),
+2. publishes to npm with `--provenance` — npm trades the GitHub OIDC token for short-lived credentials,
+3. creates the GitHub Release with generated notes.
+
+One-time bootstrap, because a trusted publisher is configured *on an existing package*:
+
+```sh
+npm login
+npm publish --access public                         # first release only
+npm trust github fresh-session-continuation \
+  --file .github/workflows/release.yml \
+  --repo erans/fresh-session-continuation \
+  --allow-publish                                   # everything after this is tokenless
+```
+
+## License
+
+MIT © Eran Sandler

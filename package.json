@@ -1,14 +1,58 @@
 {
   "name": "fresh-session-continuation",
-  "private": true,
+  "version": "0.1.0",
+  "description": "Pi extension: replaces lossy LLM-summary compaction with a zero-cost pointer compaction plus an automatic fresh-session handoff that recalls the verbatim session record.",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "context",
+    "compaction",
+    "context-engineering",
+    "memory",
+    "session",
+    "retrieval",
+    "agent"
+  ],
+  "license": "MIT",
+  "author": "Eran Sandler",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/erans/fresh-session-continuation.git"
+  },
   "type": "module",
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
-    "test": "vitest run"
+    "build": "tsc --noEmit",
+    "test": "vitest run",
+    "check": "npm run build && npm test",
+    "prepublishOnly": "npm run check"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
   },
   "devDependencies": {
+    "@earendil-works/pi-agent-core": "1.4.0",
     "@earendil-works/pi-ai": "1.4.0",
     "@earendil-works/pi-coding-agent": "1.4.0",
+    "@earendil-works/pi-tui": "1.4.0",
     "@types/node": "^22.10.0",
+    "typebox": "1.3.27",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
   }
